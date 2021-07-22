@@ -10,11 +10,15 @@ LDXX	= g++
 CXX	= g++
 AR      = ar
 
+ifeq ($(DEBUG), y)
+	CFLAGS += -D__DEBUG__
+endif
+
 
 
 MLX5_INC = -I$(ROOT_PATH)/rdma-core/build/include
 MLX5_LIBS = -L$(ROOT_PATH)/rdma-core/build/lib/statics/
-MLX5_LIBS += -lmlx5 -libverbs -lnl-3 -lnl-route-3 -lrte_pmd_mlx5
+MLX5_LIBS += -lmlx5 -libverbs -lnl-3 -lnl-route-3
 
 ifeq ($(CONFIG_MLX5),y)
 CFLAGS += -DMLX5
@@ -34,14 +38,19 @@ shared: build/$(APP)-shared
 static: export build/$(APP)-static
 	ln -sf $(APP)-static build/$(APP)
 
-build/$(APP)-shared: $(SRCS-y) 
+build/$(APP)-shared: $(SRCS-y) Makefile | build
 	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
 
-build/$(APP)-static: $(SRCS-y)
+build/$(APP)-static: $(SRCS-y) Makefile | build
 	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_STATIC)
 
 build:
 	@mkdir -p $@
+
+
+.PHONY: submodules
+submodules:
+	$(ROOT_PATH)/init_submodules.sh
 
 .PHONY: clean
 clean:
