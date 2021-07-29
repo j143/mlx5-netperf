@@ -1,3 +1,5 @@
+#ifndef NETPERF_DEBUG_
+#define NETPERF_DEBUG_
 /***************************************************************/
 // DEBUG MACROS
 #ifdef __DEBUG__
@@ -8,7 +10,7 @@
 #define EXIT (exit(1))
 #ifdef __DEBUG__
 #define NETPERF_DEBUG(msg, ...) \
-        printf("[%s] ", __FUNCTION__); \
+        printf("[%s] DEBUG: ", __FUNCTION__); \
         printf(msg, ##__VA_ARGS__); \
         printf("\n");
 #else
@@ -32,6 +34,22 @@
         printf("\n"); \
         exit(1); \
     }
+#define NETPERF_INFO(msg, ...) \
+        printf("[%s] INFO: ", __FUNCTION__); \
+        printf(msg, ##__VA_ARGS__); \
+        printf("\n");
+#define NETPERF_WARN(msg, ...) \
+        printf("[%s] INFO: ", __FUNCTION__); \
+        printf(msg, ##__VA_ARGS__); \
+        printf("\n");
+#define NETPERF_ERROR(msg, ...) \
+        printf("[%s] INFO: ", __FUNCTION__); \
+        printf(msg, ##__VA_ARGS__); \
+        printf("\n");
+#define NETPERF_PANIC(msg, ...) \
+    printf("[%s] PANIC: ", __FUNCTION__); \
+    printf(msg, ##__VA_ARGS__); \
+    printf("\n"); \
+    exit(1);
 /***************************************************************/
-
-
+#endif /* NETPERF_DEBUG_ */

@@ -1,4 +1,6 @@
 # mlx5-netperf
+A lot of this code is taken from (caladan)[https://github.com/shenango/caladan]. Trying to get a minimal example of
+sending and receiving packets directly with the mellanox OFED interface working.
 
 ## Building
 1. First, build the submodules:
