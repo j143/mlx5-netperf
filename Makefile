@@ -16,8 +16,8 @@ ifeq ($(DEBUG), y)
 endif
 
 MLX5_INC = -I$(ROOT_PATH)/rdma-core/build/include
-MLX5_LIBS = -L$(ROOT_PATH)/rdma-core/build/lib/statics
-MLX5_LIBS += -lmlx5 -libverbs -lnl-3 -lnl-route-3  -lpthread -ldl -lnuma
+MLX5_LIBS = -L$(ROOT_PATH)/rdma-core/build/lib/statics -L$(ROOT_PATH)/rdma-core/build/util
+MLX5_LIBS +=  -lmlx5 -libverbs -lrdma_util -lnl-3 -lnl-route-3  -lpthread -ldl -lnuma
 
 ifeq ($(CONFIG_MLX5),y)
 CFLAGS += -DMLX5
@@ -33,7 +33,7 @@ base_src = $(wildcard base/*.c)
 base_obj = $(base_src:.c=.o)
 
 # main - the main binary
-SRCS-y := main.c mempool.c mem.c pci.c bitmap.c sysfs.c
+SRCS-y := main.c mempool.c mem.c pci.c bitmap.c sysfs.c mbuf.c
 
 all: shared
 .PHONY: shared static

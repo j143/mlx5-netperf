@@ -1,3 +1,6 @@
+#include <stdlib.h>
+#include <stdio.h>
+
 #ifndef NETPERF_DEBUG_
 #define NETPERF_DEBUG_
 /***************************************************************/
