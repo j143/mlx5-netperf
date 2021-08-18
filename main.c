@@ -51,7 +51,6 @@ typedef unsigned long *bitmap_ptr_t;
 
 /**********************************************************************/
 // STATIC STATE
-static struct mlx5dv_dr_domain		*dmn;
 static struct mempool rx_buf_mempool;
 struct mempool tx_buf_mempool;
 static struct hardware_q *rxq_out[NUM_QUEUES];
@@ -64,65 +63,6 @@ static struct ibv_pd *pd;
 static struct ibv_mr *mr_tx;
 static struct ibv_mr *mr_rx;
 static struct pci_addr nic_pci_addr;
-
-struct tbl {
-	struct mlx5dv_dr_table		*tbl;
-	struct mlx5dv_dr_matcher		*default_egress_match;
-	struct mlx5dv_dr_rule		*default_egress_rule;
-
-	/* action that directs packets to this table */
-	struct mlx5dv_dr_action		*ingress_action;
-};
-
-struct port_matcher_tbl {
-	struct tbl		tbl;
-	struct mlx5dv_dr_matcher		*match;
-	unsigned int		port_no_bits;
-	uint8_t ipproto;
-	bool use_dst;
-	size_t match_bit_off;
-	size_t match_bit_sz;
-	struct mlx5dv_dr_rule		*rules[];
-};
-
-static DEFINE_BITMAP(tcp_listen_ports, 65536);
-static DEFINE_BITMAP(udp_listen_ports, 65536);
-
-/* level 0 flow table (root) */
-static struct mlx5dv_dr_table		*root_tbl;
-static struct mlx5dv_dr_matcher		*match_mac_and_tport;
-static struct mlx5dv_dr_matcher		*match_just_mac;
-static struct mlx5dv_dr_rule		*root_tcp_rule;
-static struct mlx5dv_dr_rule		*root_udp_rule;
-static struct mlx5dv_dr_rule		*root_catchall_rule;
-
-/* level 1 flow tables */
-static struct tbl		tcp_tbl;
-static struct tbl		udp_tbl;
-
-static struct mlx5dv_dr_matcher		*udp_tbl_dport_match;
-static struct mlx5dv_dr_matcher		*tcp_tbl_dport_match;
-
-/* level 2 flow tables */
-static struct port_matcher_tbl		*tcp_dport_tbl;
-static struct port_matcher_tbl		*tcp_sport_tbl;
-static struct port_matcher_tbl		*udp_dport_tbl;
-static struct port_matcher_tbl		*udp_sport_tbl;
-
-/* last level flow groups */
-static struct tbl		fg_tbl[NCPU];
-static struct mlx5dv_dr_action		*fg_fwd_action[NCPU];
-static unsigned int		fg_qp_assignment[NCPU];
-
-
-static union match empty_match = {
-	.size = sizeof(empty_match.buf)
-};
-
-enum dr_matcher_criteria {
-	DR_MATCHER_CRITERIA_EMPTY		= 0,
-	DR_MATCHER_CRITERIA_OUTER		= 1 << 0,
-};
 
 /**********************************************************************/
 /*
@@ -137,10 +77,10 @@ static void simple_free(void *ptr, void *priv_data) {
     free(ptr);
 }
 
-static struct mlx5dv_ctx_allocators dv_allocators = {
+/*static struct mlx5dv_ctx_allocators dv_allocators = {
 	.alloc = simple_alloc,
 	.free = simple_free,
-};
+};*/
 
 static int parse_directpath_pci(const char *val)
 {
@@ -246,80 +186,7 @@ ibv_device_to_pci_addr(const struct ibv_device *device,
 	return 0;
 }
 
-
-static int mlx5_tbl_init(struct tbl *tbl, int level, struct mlx5dv_dr_action *default_egress)
-{
-	struct mlx5dv_dr_action *action[1] = {default_egress};
-
-	tbl->tbl = mlx5dv_dr_table_create(dmn, level);
-	if (!tbl->tbl) {
-        NETPERF_WARN("Failing on dr_table_create: %s\n", strerror(errno));
-		return -errno;
-    }
-
-	tbl->default_egress_match = mlx5dv_dr_matcher_create(tbl->tbl, 2, DR_MATCHER_CRITERIA_EMPTY, &empty_match.params);
-	if (!tbl->default_egress_match) {
-        NETPERF_WARN("Failing on setting default_egress_match: %s\n", strerror(errno));
-		return -errno;
-    }
-
-	tbl->ingress_action = mlx5dv_dr_action_create_dest_table(tbl->tbl);
-	if (!tbl->ingress_action) {
-        NETPERF_WARN("Failing on creating dest_table for ingress action: %s\n", strerror(errno));
-		return -errno;
-    }
-
-	tbl->default_egress_rule = mlx5dv_dr_rule_create(
-			  tbl->default_egress_match, &empty_match.params, 1, action);
-	if (!tbl->default_egress_rule) {
-        NETPERF_WARN("Failing on setting default_egress_rule: %s\n", strerror(errno));
-		return -errno;
-    }
-
-	return 0;
-}
-
-
-int mlx5_init_fg_tables(int nr_rxq)
-{
-	int i, ret;
-
-	for (i = 0; i < nr_rxq; i++) {
-		/* forward to qp 0 */
-		fg_fwd_action[i] = mlx5dv_dr_action_create_dest_ibv_qp(rxqs[0].qp);
-		if (!fg_fwd_action[i]) {
-            NETPERF_ERROR("Failed to create dest_ibv_qp: %s\n", strerror(-errno));
-			return -errno;
-        }
-
-		ret = mlx5_tbl_init(&fg_tbl[i], 3, fg_fwd_action[i]);
-		if (ret) {
-            NETPERF_ERROR("mlx5_tbl_init failed");
-			return ret;
-        }
-
-		fg_qp_assignment[i] = 0;
-	}
-
-	return 0;
-}
-
 int mlx5_init_flows(int num_rx_queues) {
-    int ret;
-
-    dmn = mlx5dv_dr_domain_create(context, MLX5DV_DR_DOMAIN_TYPE_NIC_RX);
-    if (!dmn) {
-        NETPERF_ERROR("Could not create rx domain: %s\n", strerror(-errno));
-        return -errno;
-    }
-
-    ret = mlx5_init_fg_tables(num_rx_queues);
-    if (ret) {
-        NETPERF_ERROR("Could not init fg_tables: %s\n", strerror(-ret));
-        return ret;
-    }
-
-
     return 0;
 }
 
@@ -523,7 +390,7 @@ int mlx5_init_txq(int index, struct mlx5_txq *v) {
 	};
 	v->tx_cq = mlx5dv_create_cq(context, &cq_attr, &dv_cq_attr);
 	if (!v->tx_cq) {
-        NETPERF_WARN("Could not create tx cqe");
+        NETPERF_WARN("Could not create tx cq: %s", strerror(errno));
 		return -errno;
     }
 
@@ -663,7 +530,7 @@ int init_mlx5() {
 		return -1;
 	}
 
-	attr.flags = MLX5DV_CONTEXT_FLAGS_DEVX;
+	attr.flags = 0;
 	context = mlx5dv_open_device(dev_list[i], &attr);
 	if (!context) {
 	    NETPERF_ERROR("mlx5_init: Couldn't get context for %s (errno %d)",
@@ -673,12 +540,12 @@ int init_mlx5() {
 
 	ibv_free_device_list(dev_list);
 
-	ret = mlx5dv_set_context_attr(context,
+	/*ret = mlx5dv_set_context_attr(context,
 		  MLX5DV_CTX_ATTR_BUF_ALLOCATORS, &dv_allocators);
 	if (ret) {
 		NETPERF_ERROR("mlx5_init: error setting memory allocator");
 		return -1;
-	}
+	}*/
 
 	pd = ibv_alloc_pd(context);
 	if (!pd) {
@@ -710,10 +577,12 @@ int init_mlx5() {
     }
     rxq_out[0] = &rxqs[0].rxq;
 
-    ret = mlx5_init_flows(NUM_QUEUES);
+    // do we need to install ANY rules for plain packets to show up?
+    /*ret = mlx5_init_flows(NUM_QUEUES);
     if (ret) {
         NETPERF_ERROR("Failed to init flows");
-    }
+        return ret;
+    }*/
 
     ret = mlx5_init_txq(0, &txqs[0]);
     if (ret) {
@@ -722,6 +591,7 @@ int init_mlx5() {
     }
     txq_out[0] = &txqs[0].txq;
 
+    NETPERF_INFO("Finished creating txq and rxq");
     return ret;
 }
 
