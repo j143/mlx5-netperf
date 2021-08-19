@@ -6,6 +6,12 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <unistd.h>
+#include <getopt.h>
+#include <net/ethernet.h>
+#include <net/ip.h>
+#include <net/udp.h>
+#include <netinet/in.h>
 
 #include <base/debug.h>
 #include <base/mem.h>
@@ -28,6 +34,9 @@
 #define NUM_QUEUES 1
 #define RQ_NUM_DESC			1024
 #define SQ_NUM_DESC			128
+#define RUNTIME_RX_BATCH_SIZE		32
+#define SQ_CLEAN_THRESH			RUNTIME_RX_BATCH_SIZE
+#define SQ_CLEAN_MAX			SQ_CLEAN_THRESH
 /* space for the mbuf struct */
 #define RX_BUF_HEAD \
  (align_up(sizeof(struct mbuf), 2 * CACHE_LINE_SIZE))
@@ -49,8 +58,17 @@ typedef unsigned long *bitmap_ptr_t;
 #define BITMAP_POS_IDX(pos)	((pos) / BITS_PER_LONG)
 #define BITMAP_POS_SHIFT(pos)	((pos) % BITS_PER_LONG)
 
+#define RTE_ETHER_TYPE_IPV4 0x0800
 /**********************************************************************/
 // STATIC STATE
+static uint8_t mode;
+static struct eth_addr server_mac;
+static struct eth_addr client_mac;
+static uint32_t server_ip;
+static uint32_t client_ip;
+static uint32_t server_port = 54321; 
+static uint32_t client_port = 54321;
+
 static struct mempool rx_buf_mempool;
 struct mempool tx_buf_mempool;
 static struct hardware_q *rxq_out[NUM_QUEUES];
@@ -68,37 +86,88 @@ static struct pci_addr nic_pci_addr;
 /*
  * simple_alloc - simple memory allocator for internal MLX5 structures
  */
-static void *simple_alloc(size_t size, void *priv_data)
+/*static void *simple_alloc(size_t size, void *priv_data)
 {
     return malloc(size);
 }
 
 static void simple_free(void *ptr, void *priv_data) {
     free(ptr);
-}
+}*/
 
+// TODO: this was to put the rx ring in shared memory to enable work stealing.
 /*static struct mlx5dv_ctx_allocators dv_allocators = {
 	.alloc = simple_alloc,
 	.free = simple_free,
 };*/
 
-static int parse_directpath_pci(const char *val)
-{
-	int ret;
-
-	ret = pci_str_to_addr(val, &nic_pci_addr);
-	if (ret)
-		return ret;
-
-	NETPERF_INFO("directpath: specified pci address %s", val);
-	cfg_pci_addr_specified = true;
-	return 0;
-}
-
 static int parse_args(int argc, char *argv[]) {
-    // for now, hardcode the pci address
-    const char pci_addr[] = "0000:37:00.0";
-    parse_directpath_pci(pci_addr);
+    // have mode and pci address
+    int opt = 0;
+
+    static struct option long_options[] = {
+        {"mode",      required_argument,       0,  'm' },
+        {"pci_addr",  required_argument,       0, 'w'},
+        {"client_mac", required_argument, 0, 'c'},
+        {"server_mac", required_argument, 0, 'e'},
+        {"client_ip", required_argument, 0, 'i'},
+        {"server_ip", required_argument, 0, 's'},
+        {0,           0,                 0,  0   }
+    };
+    int long_index = 0;
+    int ret;
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:",
+                              long_options, &long_index )) != -1) {
+        switch (opt) {
+            case 'm':
+                if (!strcmp(optarg, "CLIENT")) {
+                    mode = UDP_CLIENT;
+                } else if (!strcmp(optarg, "SERVER")) {
+                    mode = UDP_SERVER;
+                } else {
+                    NETPERF_ERROR("Passed in invalid mode: %s", optarg);
+                    return -EINVAL;
+                }
+                break;
+            case 'w':
+                ret = pci_str_to_addr(optarg, &nic_pci_addr);
+                if (ret) {
+                    NETPERF_ERROR("Could not parse pci addr: %s", optarg);
+                    return -EINVAL;
+                }
+                break;
+            case 'c':
+                if (str_to_mac(optarg, &client_mac) != 0) {
+                   NETPERF_ERROR("failed to convert %s to a mac address", optarg);
+                   return -EINVAL;
+                }
+                NETPERF_INFO("Parsed our eth addr: %s", optarg);
+                break;
+            case 'e':
+                if (str_to_mac(optarg, &server_mac) != 0) {
+                   NETPERF_ERROR("failed to convert %s to a mac address", optarg);
+                   return -EINVAL;
+                }
+                NETPERF_INFO("Parsed server eth addr: %s", optarg);
+                break;
+            case 'i':
+                if (str_to_ip(optarg, &client_ip) != 0) {
+                    NETPERF_ERROR("Failed to parse %s as an IP addr", optarg);
+                    return -EINVAL;
+                }
+                break;
+            case 's':
+                if (str_to_ip(optarg, &server_ip) != 0) {
+                    NETPERF_ERROR("Failed to parse %s as an IP addr", optarg);
+                    return -EINVAL;
+                }
+                break;
+
+            default:
+                NETPERF_WARN("Invalid arguments");
+                exit(EXIT_FAILURE);
+        }
+    }
     return 0;
 }
 
@@ -595,6 +664,154 @@ int init_mlx5() {
     return ret;
 }
 
+/*
+ * mlx5_gather_completions - collect up to budget received packets and completions
+ */
+int mlx5_gather_completions(struct mbuf **mbufs, struct mlx5_txq *v, unsigned int budget)
+{
+	struct mlx5dv_cq *cq = &v->tx_cq_dv;
+	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
+
+	unsigned int compl_cnt;
+	uint8_t opcode;
+	uint16_t wqe_idx;
+
+	for (compl_cnt = 0; compl_cnt < budget; compl_cnt++, v->cq_head++) {
+		cqe = &cqes[v->cq_head & (cq->cqe_cnt - 1)];
+		opcode = cqe_status(cqe, cq->cqe_cnt, v->cq_head);
+
+		if (opcode == MLX5_CQE_INVALID)
+			break;
+
+		PANIC_ON_TRUE(opcode != MLX5_CQE_REQ, "wrong opcode");
+
+		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "wrong cqe format");
+
+		wqe_idx = be16toh(cqe->wqe_counter) & (v->tx_qp_dv.sq.wqe_cnt - 1);
+		mbufs[compl_cnt] = load_acquire(&v->buffers[wqe_idx]);
+	}
+
+	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
+
+	return compl_cnt;
+}
+
+/*
+ * mlx5_transmit_one - send one mbuf
+ * @m: mbuf to send
+ *
+ * uses local kthread tx queue
+ * returns 0 on success, -1 on error
+ */
+int mlx5_transmit_one(struct mbuf *m)
+{
+	int i, compl = 0;
+	struct mlx5_txq *v = &txqs[0];
+	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
+	struct mbuf *mbs[SQ_CLEAN_MAX];
+	struct mlx5_wqe_ctrl_seg *ctrl;
+	struct mlx5_wqe_eth_seg *eseg;
+	struct mlx5_wqe_data_seg *dpseg;
+	void *segment;
+
+	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
+		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
+		for (i = 0; i < compl; i++)
+			mbuf_free(mbs[i]);
+		if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
+            NETPERF_WARN("txq full");
+			return -1;
+		}
+	}
+
+	segment = v->tx_qp_dv.sq.buf + (idx << v->tx_sq_log_stride);
+	ctrl = segment;
+	eseg = segment + sizeof(*ctrl);
+	dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
+
+	ctrl->opmod_idx_opcode = htobe32(((v->sq_head & 0xffff) << 8) |
+					       MLX5_OPCODE_SEND);
+
+
+    NETPERF_DEBUG("Transmitting mbuf with length %u, data_ptr %p", (unsigned)mbuf_length(m), mbuf_data(m));
+	dpseg->byte_count = htobe32(mbuf_length(m));
+	dpseg->addr = htobe64((uint64_t)mbuf_data(m));
+
+	/* record buffer */
+	store_release(&v->buffers[v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1)], m);
+	v->sq_head++;
+
+	/* write doorbell record */
+	udma_to_device_barrier();
+	v->tx_qp_dv.dbrec[MLX5_SND_DBR] = htobe32(v->sq_head & 0xffff);
+
+	/* ring bf doorbell */
+	mmio_wc_start();
+	mmio_write64_be(v->tx_qp_dv.bf.reg, *(__be64 *)ctrl);
+	mmio_flush_writes();
+
+	return 0;
+
+}
+
+int do_client() {
+    // TX window???
+    struct mbuf MBUFS[32];
+    uint16_t message_size = 100;
+
+
+    // for now: send a SINGLE packet to the other side and make sure it's
+    // received
+    unsigned char *data = (unsigned char *)mempool_alloc(&tx_buf_mempool);
+    struct mbuf *mbuf = &MBUFS[0];
+    mbuf_init(mbuf, data, MBUF_DEFAULT_LEN, 0);
+    
+    // fill in the mbuf
+    struct eth_hdr *eth = mbuf_put_hdr(mbuf, struct eth_hdr);
+    struct ip_hdr *ipv4 = mbuf_put_hdr(mbuf, struct ip_hdr);
+    struct udp_hdr *udp = mbuf_put_hdr(mbuf, struct udp_hdr);
+    unsigned char *data_ptr = mbuf_put(mbuf, message_size);
+
+    // fill in the ethernet header
+    ether_addr_copy(&client_mac, &eth->shost);
+    ether_addr_copy(&server_mac, &eth->dhost);
+
+    // TODO: turn these into debug asserts
+    NETPERF_ASSERT(eth_addr_equal(&eth->shost, &client_mac) == 1, "Source addrs not equal");
+    NETPERF_ASSERT(eth_addr_equal(&eth->dhost, &server_mac) == 1, "Dest addrs not equal");
+    eth->type = htons(ETHTYPE_IP);
+    
+    // fill in the ipv4 header
+    ipv4->tos = 0x0;
+    ipv4->len = htons(sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + message_size);
+    ipv4->id = htons(1);
+    ipv4->off = 0;
+    ipv4->ttl = 64;
+    ipv4->proto = IPPROTO_UDP;
+    ipv4->chksum = 0;
+    ipv4->saddr = htonl(client_ip);
+    ipv4->daddr = htonl(server_ip);
+    ipv4->chksum = get_chksum(ipv4);
+
+    // fill in the udp header
+    udp->src_port = htons(client_port);
+    udp->dst_port = htons(server_port);
+    udp->len = htons(sizeof(struct udp_hdr));
+    udp->chksum = 0;
+    udp->chksum = get_chksum(udp);
+
+    // write some data
+    memset(data_ptr, 'a', message_size);
+
+    mlx5_transmit_one(mbuf);
+    NETPERF_INFO("Finished transmit one");
+    return 0;
+}
+
+int do_server() {
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     int ret = 0;
     NETPERF_DEBUG("In netperf program");
@@ -606,6 +823,12 @@ int main(int argc, char *argv[]) {
     if (ret) {
         NETPERF_WARN("init_mlx5() failed.");
         return ret;
+    }
+
+    if (mode == UDP_CLIENT) {
+        return do_client();
+    } else {
+        return do_server();
     }
     return ret;
 }

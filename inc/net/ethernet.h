@@ -8,6 +8,8 @@
 
 #include <base/types.h>
 #include <base/compiler.h>
+#include <base/debug.h>
+#include <base/rte_memcpy.h>
 
 #define ETH_ADDR_LEN		6
 #define ETH_TYPE_LEN		2
@@ -27,6 +29,36 @@ struct eth_addr {
 #define ETH_ADDR_GROUP		0x01 /* multicast or broadcast */
 #define ETH_ADDR_BROADCAST {.addr = {0xFF, 0XFF, 0XFF, 0XFF, 0XFF, 0XFF},}
 static const struct eth_addr eth_addr_broadcast = ETH_ADDR_BROADCAST;
+
+static int str_to_mac(const char *s, struct eth_addr *mac_out) {
+    unsigned int values[ETH_ADDR_LEN];
+    int ret = sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x%*c", &values[0], &values[1], &values[2], &values[3],&values[4], &values[5]);
+    if (6 != ret) {
+        printf("Scan of mac addr %s was not 6, but length %d\n", s, ret);
+        return EINVAL;
+    }
+    for (int i = 0; i < ETH_ADDR_LEN; i++) {
+        mac_out->addr[i] = (uint8_t)values[i];
+    }
+
+    return 0;
+}
+
+
+/**
+ * Copy an Ethernet address.
+ *
+ * @param ea_from
+ *   A pointer to a ether_addr structure holding the Ethernet address to copy.
+ * @param ea_to
+ *   A pointer to a ether_addr structure where to copy the Ethernet address.
+ */
+static inline void
+ether_addr_copy(struct eth_addr *from, struct eth_addr *to)
+{
+    rte_memcpy(to, from, sizeof(struct eth_addr));
+}
+
 
 static inline uint64_t eth_addr_to_uint64(struct eth_addr *addr)
 {
@@ -50,6 +82,17 @@ static inline void uint64_to_eth_addr(uint64_t val, struct eth_addr *addr)
 static inline bool eth_addr_is_multicast(struct eth_addr *addr)
 {
 	return (addr->addr[0] & ETH_ADDR_GROUP);
+}
+
+static inline bool eth_addr_equal(struct eth_addr *addr1, struct eth_addr *addr2) {
+    int i = 0;
+    for (i = 0; i < ETH_ADDR_LEN; i++) {
+        if (addr1->addr[i] != addr2->addr[i]) {
+            NETPERF_WARN("Index %d not equal, 1: %u, 2: %u", i, (unsigned)addr1->addr[i], (unsigned)addr2->addr[i]);
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static inline bool eth_addr_is_zero(struct eth_addr *addr)

@@ -1,3 +1,4 @@
+#pragma once
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -9,6 +10,11 @@
 #define CYN   "\x1B[36m"
 #define WHT   "\x1B[37m"
 #define RESET "\x1B[0m"
+
+enum {
+    UDP_CLIENT = 0,
+    UDP_SERVER
+};
 
 #ifndef NETPERF_DEBUG_
 #define NETPERF_DEBUG_

@@ -85,7 +85,7 @@ static inline unsigned char *mbuf_pull_or_null(struct mbuf *m, unsigned int len)
 static inline unsigned char *mbuf_push(struct mbuf *m, unsigned int len)
 {
 	m->data -= len;
-	BUG_ON(m->data < m->head);
+	NETPERF_ASSERT(m->data >= m->head, "Mbuf %p data underflow: data_pointer %p before head %p", m, m->data, m->head);
 	m->len += len;
 	return m->data;
 }
@@ -101,7 +101,7 @@ static inline unsigned char *mbuf_put(struct mbuf *m, unsigned int len)
 {
 	unsigned char *tmp = m->data + m->len;
 	m->len += len;
-	NETPERF_ASSERT(m->len > m->head_len, "mbuf put failed");
+	NETPERF_ASSERT(m->len <= m->head_len, "mbuf %p put failed: overflow: length %u is > head_len %u", m, (unsigned)m->len, (unsigned)m->head_len);
 	return tmp;
 }
 
