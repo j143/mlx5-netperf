@@ -49,26 +49,20 @@ static size_t num_segments = 1;
 static size_t segment_size = 1024;
 static size_t working_set_size = 16384;
 static int zero_copy = 0;
+static int client_specified = 0;
 
-static unsigned char rss_key[40] = {
-	0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A,
-	0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF,
-	0x8F, 0xDE, 0xD2, 0xC5, 0xE2, 0x04, 0xB1, 0xCF, 0xB1, 0xB1, 0xA1,
-	0x0D, 0x6D, 0x86, 0xBA, 0x61, 0x78, 0xEB};
-
-static struct ibv_flow *eth_flow;
 static struct mempool rx_buf_mempool;
 static struct mempool tx_buf_mempool;
 static struct mempool mbuf_mempool;
 static void *server_working_set;
 static struct mlx5_rxq rxqs[NUM_QUEUES];
-static struct direct_txq *txq_out[NUM_QUEUES];
 static struct mlx5_txq txqs[NUM_QUEUES];
 static struct ibv_context *context;
 static struct ibv_pd *pd;
 static struct ibv_mr *tx_mr;
 static struct ibv_mr *rx_mr;
 static struct pci_addr nic_pci_addr;
+static size_t max_inline_data = 256;
 static uint32_t total_dropped;
 
 /**********************************************************************/
@@ -135,7 +129,8 @@ static int parse_args(int argc, char *argv[]) {
                    NETPERF_ERROR("failed to convert %s to a mac address", optarg);
                    return -EINVAL;
                 }
-                NETPERF_INFO("Parsed our eth addr: %s", optarg);
+                client_specified = 1;
+                NETPERF_INFO("Parsed client eth addr: %s", optarg);
                 break;
             case 'e':
                 if (str_to_mac(optarg, &server_mac) != 0) {
@@ -176,241 +171,6 @@ static int parse_args(int argc, char *argv[]) {
                 exit(EXIT_FAILURE);
         }
     }
-    return 0;
-}
-
-
-int mlx5_init_flows(int num_rx_queues) {
-    return 0;
-}
-
-int mlx5_qs_init_flows(struct mlx5_rxq *v)
-{
-	struct ibv_wq *ind_tbl[1] = {v->rx_wq};
-	struct ibv_rwq_ind_table_init_attr rwq_attr = {0};
-	rwq_attr.ind_tbl = ind_tbl;
-    rwq_attr.log_ind_tbl_size = __builtin_ctz(1);
-    rwq_attr.comp_mask = 0;
-	v->rwq_ind_table = ibv_create_rwq_ind_table(context, &rwq_attr);
-	if (!v->rwq_ind_table) {
-        NETPERF_WARN("Failed to create rx indirection table");
-		return -errno;
-    }
-
-	struct ibv_rx_hash_conf rss_cnf = {
-		.rx_hash_function = IBV_RX_HASH_FUNC_TOEPLITZ,
-		.rx_hash_key_len = ARRAY_SIZE(rss_key),
-		.rx_hash_key = rss_key,
-		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_UDP | IBV_RX_HASH_DST_PORT_UDP,
-	};
-
-	struct ibv_qp_init_attr_ex qp_ex_attr = {
-		.qp_type = IBV_QPT_RAW_PACKET,
-		.comp_mask = IBV_QP_INIT_ATTR_RX_HASH | IBV_QP_INIT_ATTR_IND_TABLE | IBV_QP_INIT_ATTR_PD,
-		.pd = pd,
-		.rwq_ind_tbl = v->rwq_ind_table,
-		.rx_hash_conf = rss_cnf,
-	};
-
-	v->qp = ibv_create_qp_ex(context, &qp_ex_attr);
-	if (!v->qp) {
-        NETPERF_WARN("Failed to create rx qp");
-		return -errno;
-    }
-
-    struct eth_addr *our_eth = &client_mac;
-    if (mode == UDP_SERVER) {
-        NETPERF_DEBUG("Setting eth as server_mac");
-        our_eth = &server_mac;
-    }
-
-    /* *Register sterring rules to intercept packets to our mac address and
-     * place packet in ring pointed by v->qp */
-    struct raw_eth_flow_attr {
-        struct ibv_flow_attr attr;
-        struct ibv_flow_spec_eth spec_eth;
-    } __attribute__((packed)) flow_attr = {
-        .attr = {
-            .comp_mask = 0,
-            .type = IBV_FLOW_ATTR_NORMAL,
-            .size = sizeof(flow_attr),
-            .priority = 0,
-            .num_of_specs = 1,
-            .port = PORT_NUM, // what port is this? dpdk port?
-            .flags = 0,
-        },
-        .spec_eth = {
-            .type = IBV_FLOW_SPEC_ETH,
-            .size = sizeof(struct ibv_flow_spec_eth),
-            .val = {
-                .src_mac = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-                .ether_type = 0,
-                .vlan_tag = 0,
-            },
-            .mask = {
-                .dst_mac = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
-                .src_mac = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-                .ether_type = 0,
-                .vlan_tag = 0,
-            }
-        }
-    };
-    rte_memcpy(&flow_attr.spec_eth.val.dst_mac, our_eth, 6);
-    
-    // Do some minimal RSS stuff so we receive packets
-    eth_flow = ibv_create_flow(v->qp, &flow_attr.attr);
-    if (!eth_flow) {
-        NETPERF_ERROR("Not able to create eth_flow: %s", strerror(errno));
-        return -errno;
-    }
-
-    return 0;
-}
-
-// TODO:
-//  on the tx side: we will need to actually rewrite the logic here
-//  to dynamically create the work requests based on the number of
-//  scatter-gather elements
-//  what happens if you reach the end of the wqe?? how does the wrap around
-//  happen
-static void mlx5_init_tx_segment(struct mlx5_txq *v, unsigned int idx)
-{
-	int size;
-	struct mlx5_wqe_ctrl_seg *ctrl;
-	struct mlx5_wqe_eth_seg *eseg;
-	struct mlx5_wqe_data_seg *dpseg;
-	void *segment;
-
-	segment = v->tx_qp_dv.sq.buf + idx * v->tx_qp_dv.sq.stride;
-	ctrl = segment;
-	eseg = segment + sizeof(*ctrl);
-	dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
-
-	size = (sizeof(*ctrl) / 16) +
-	       (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
-	       sizeof(struct mlx5_wqe_data_seg) / 16;
-
-	/* set ctrl segment */
-	*(uint32_t *)(segment + 8) = 0;
-	ctrl->imm = 0;
-	ctrl->fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
-	ctrl->qpn_ds = htobe32(size | (v->tx_qp->qp_num << 8));
-
-	/* set eseg */
-	memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
-	eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
-
-	/* set dpseg */
-	dpseg->lkey = htobe32(tx_mr->lkey);
-}
-
-int mlx5_init_txq(int index, struct mlx5_txq *v) {
-	int i, ret;
-
-	/* Create a CQ */
-	struct ibv_cq_init_attr_ex cq_attr = {
-		.cqe = SQ_NUM_DESC,
-		.channel = NULL,
-		.comp_vector = 0,
-		.wc_flags = 0,
-		.comp_mask = IBV_CQ_INIT_ATTR_MASK_FLAGS,
-		.flags = IBV_CREATE_CQ_ATTR_SINGLE_THREADED,
-	};
-	struct mlx5dv_cq_init_attr dv_cq_attr = {
-		.comp_mask = 0,
-	};
-	v->tx_cq = mlx5dv_create_cq(context, &cq_attr, &dv_cq_attr);
-	if (!v->tx_cq) {
-        NETPERF_WARN("Could not create tx cq: %s", strerror(errno));
-		return -errno;
-    }
-
-	/* Create a 1-sided queue pair for sending packets */
-    // TODO: understand the relationship between max_send_sge and how much it's
-    // possible to actually scatter-gather
-	struct ibv_qp_init_attr_ex qp_init_attr = {
-		.send_cq = ibv_cq_ex_to_cq(v->tx_cq),
-		.recv_cq = ibv_cq_ex_to_cq(v->tx_cq),
-		.cap = {
-			.max_send_wr = SQ_NUM_DESC,
-			.max_recv_wr = 0,
-			.max_send_sge = 1, // TODO: does TX scatter-gather still work if this is 1?
-			.max_inline_data = 256,
-		},
-		.qp_type = IBV_QPT_RAW_PACKET,
-		.sq_sig_all = 1,
-		.pd = pd,
-		.comp_mask = IBV_QP_INIT_ATTR_PD
-	};
-	struct mlx5dv_qp_init_attr dv_qp_attr = {
-		.comp_mask = 0,
-	};
-	v->tx_qp = mlx5dv_create_qp(context, &qp_init_attr, &dv_qp_attr);
-	if (!v->tx_qp) {
-        NETPERF_WARN("Could not create tx qp: %s", strerror(errno));
-		return -errno;
-    }
-
-	/* Turn on TX QP in 3 steps */
-    // TODO: why are these three steps required
-	struct ibv_qp_attr qp_attr;
-	memset(&qp_attr, 0, sizeof(qp_attr));
-	qp_attr.qp_state = IBV_QPS_INIT;
-	qp_attr.port_num = 1;
-	ret = ibv_modify_qp(v->tx_qp, &qp_attr, IBV_QP_STATE | IBV_QP_PORT);
-	if (ret) {
-        NETPERF_WARN("Could not modify tx qp for IBV_QPS_INIT (1st step)");
-		return -ret;
-    }
-
-	memset(&qp_attr, 0, sizeof(qp_attr));
-	qp_attr.qp_state = IBV_QPS_RTR;
-	ret = ibv_modify_qp(v->tx_qp, &qp_attr, IBV_QP_STATE);
-	if (ret) {
-        NETPERF_WARN("Could not modify tx_qp for IBV_QPS_RTR (2nd step)");
-		return -ret;
-    }
-
-	memset(&qp_attr, 0, sizeof(qp_attr));
-	qp_attr.qp_state = IBV_QPS_RTS;
-	ret = ibv_modify_qp(v->tx_qp, &qp_attr, IBV_QP_STATE);
-	if (ret) {
-        NETPERF_WARN("Could not modify tx_qp for IBV_QPS_RTS (3rd step)");
-		return -ret;
-    }
-
-	struct mlx5dv_obj obj = {
-		.cq = {
-			.in = ibv_cq_ex_to_cq(v->tx_cq),
-			.out = &v->tx_cq_dv,
-		},
-		.qp = {
-			.in = v->tx_qp,
-			.out = &v->tx_qp_dv,
-		},
-	};
-	ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ | MLX5DV_OBJ_QP);
-	if (ret) {
-        NETPERF_WARN("Could not init mlx5dv_obj");
-		return -ret;
-    }
-
-	PANIC_ON_TRUE(!is_power_of_two(v->tx_cq_dv.cqe_size), "tx cqe_size not power of two");
-	PANIC_ON_TRUE(!is_power_of_two(v->tx_qp_dv.sq.stride), "tx stride size not power of two");
-	v->tx_sq_log_stride = __builtin_ctz(v->tx_qp_dv.sq.stride);
-	v->tx_cq_log_stride = __builtin_ctz(v->tx_cq_dv.cqe_size);
-
-	/* allocate list of posted buffers */
-	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
-	if (!v->buffers) {
-        NETPERF_WARN("Could not alloc tx wqe buffers");
-		return -ENOMEM;
-    }
-
-    // init each tx wqe
-	for (i = 0; i < v->tx_qp_dv.sq.wqe_cnt; i++)
-		mlx5_init_tx_segment(v, i);
-
     return 0;
 }
 
@@ -497,30 +257,33 @@ int init_mlx5() {
         }
     }
 
-    // init single rxq and single txq
-    // Here is where, if we ever want more than one rxq/txq, we'd init more
-    // the array
+    // Initialize single rxq attached to the rx mempool
     ret = mlx5_init_rxq(&rxqs[0], &rx_buf_mempool, context, pd, rx_mr);
     RETURN_ON_ERR(ret, "Failed to create rxq: %s", strerror(-ret));
 
-    ret = mlx5_qs_init_flows(&rxqs[0]);
-    if (ret) {
-        NETPERF_ERROR("Failed to init flows for listening");
+    struct eth_addr *my_eth = &server_mac;
+    struct eth_addr *other_eth = &client_mac;
+    int hardcode_sender = client_specified;
+    if (mode == UDP_CLIENT) {
+        my_eth = &client_mac;
+        other_eth = &server_mac;
     }
 
-    // do we need to install ANY rules for plain packets to show up?
-    /*ret = mlx5_init_flows(NUM_QUEUES);
-    if (ret) {
-        NETPERF_ERROR("Failed to init flows");
-        return ret;
-    }*/
+    ret = mlx5_qs_init_flows(&rxqs[0], pd, context, my_eth, other_eth, hardcode_sender);
+    RETURN_ON_ERR(ret, "Failed to install queue steering rules");
 
-    ret = mlx5_init_txq(0, &txqs[0]);
-    if (ret) {
-        NETPERF_ERROR("Failed to create txq");
-        return ret;
+    // TODO: for a fair comparison later, initialize the tx segments at runtime
+    int init_each_tx_segment = 1;
+    if (mode == UDP_SERVER && num_segments > 1) {
+        init_each_tx_segment = 0;
     }
-    txq_out[0] = &txqs[0].txq;
+    ret = mlx5_init_txq(&txqs[0], 
+                            pd, 
+                            context, 
+                            tx_mr, 
+                            max_inline_data, 
+                            init_each_tx_segment);
+    RETURN_ON_ERR(ret, "Failed to initialize tx queue");
 
     NETPERF_INFO("Finished creating txq and rxq");
     return ret;
