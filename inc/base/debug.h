@@ -71,6 +71,12 @@ enum {
     printf("\n"); \
     exit(1);
 
+#define RETURN_ON_ERR(return_var, msg, ...) \
+    if (ret) { \
+        NETPERF_ERROR(msg, ##__VA_ARGS__); \
+        return ret; \
+    }
+
 /**
  * PANIC_ON_TRUE - a fatal check that doesn't compile out in release builds
  * @condition: the condition to check (fails on true)

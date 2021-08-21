@@ -16,9 +16,6 @@
 #include <base/list.h>
 #include <base/debug.h>
 
-#define MBUF_DEFAULT_LEN 8192 // might need to change depending on the size of the actual mbuf struct
-#define MBUF_DEFAULT_HEADROOM	128
-
 
 struct mbuf {
 	struct mbuf	*next;	   /* the next mbuf in the mbufq */

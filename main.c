@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 
 #include <base/debug.h>
+#include <base/parse.h>
 #include <base/mem.h>
 #include <base/compiler.h>
 #include <base/mempool.h>
@@ -26,41 +27,15 @@
 #include <util/mmio.h>
 #include <mlx5.h>
 #include <mlx5_ifc.h>
+#include <mlx5_init.h>
 #include <infiniband/verbs.h>
 #include <infiniband/mlx5dv.h>
 /**********************************************************************/
 // CONSTANTS
-#define PORT_NUM 1 // TODO: make this dynamic
-#define NUM_BUFS_PER_PAGE 256
-#define TOTAL_MEMPOOL_PAGES 40
-#define NUM_QUEUES 1
-#define RQ_NUM_DESC			1024
-#define SQ_NUM_DESC			128
-#define RUNTIME_RX_BATCH_SIZE		32
-#define SQ_CLEAN_THRESH			RUNTIME_RX_BATCH_SIZE
-#define SQ_CLEAN_MAX			SQ_CLEAN_THRESH
-/* space for the mbuf struct */
-#define RX_BUF_HEAD \
- (align_up(sizeof(struct mbuf), 2 * CACHE_LINE_SIZE))
-/* some NICs expect enough padding for CRC etc.*/
-#define RX_BUF_TAIL			64
-#define NET_MTU 9216 // jumbo frames is turned on in this interface
 /**********************************************************************/
-#define BITS_PER_LONG	(sizeof(long) * 8)
-#define BITMAP_LONG_SIZE(nbits) \
-	div_up(nbits, (typeof(nbits))BITS_PER_LONG)
-
-#define DEFINE_BITMAP(name, nbits) \
-	unsigned long name[BITMAP_LONG_SIZE(nbits)]
-#define DECLARE_BITMAP(name, nbits) \
-	extern DEFINE_BITMAP(name, nbits)
-
-typedef unsigned long *bitmap_ptr_t;
-
-#define BITMAP_POS_IDX(pos)	((pos) / BITS_PER_LONG)
-#define BITMAP_POS_SHIFT(pos)	((pos) % BITS_PER_LONG)
-
-#define RTE_ETHER_TYPE_IPV4 0x0800
+#define FULL_PROTO_HEADER 42
+#define PKT_ID_SIZE 0
+#define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
 /**********************************************************************/
 // STATIC STATE
 static uint8_t mode;
@@ -70,19 +45,29 @@ static uint32_t server_ip;
 static uint32_t client_ip;
 static uint32_t server_port = 54321; 
 static uint32_t client_port = 54321;
+static size_t num_segments = 1;
+static size_t segment_size = 1024;
+static size_t working_set_size = 16384;
+static int zero_copy = 0;
+
+static unsigned char rss_key[40] = {
+	0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A,
+	0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF,
+	0x8F, 0xDE, 0xD2, 0xC5, 0xE2, 0x04, 0xB1, 0xCF, 0xB1, 0xB1, 0xA1,
+	0x0D, 0x6D, 0x86, 0xBA, 0x61, 0x78, 0xEB};
 
 static struct ibv_flow *eth_flow;
 static struct mempool rx_buf_mempool;
-struct mempool tx_buf_mempool;
-static struct hardware_q *rxq_out[NUM_QUEUES];
+static struct mempool tx_buf_mempool;
+static struct mempool mbuf_mempool;
+static void *server_working_set;
 static struct mlx5_rxq rxqs[NUM_QUEUES];
 static struct direct_txq *txq_out[NUM_QUEUES];
 static struct mlx5_txq txqs[NUM_QUEUES];
-static bool cfg_pci_addr_specified;
 static struct ibv_context *context;
 static struct ibv_pd *pd;
-static struct ibv_mr *mr_tx;
-static struct ibv_mr *mr_rx;
+static struct ibv_mr *tx_mr;
+static struct ibv_mr *rx_mr;
 static struct pci_addr nic_pci_addr;
 static uint32_t total_dropped;
 
@@ -108,6 +93,7 @@ static void simple_free(void *ptr, void *priv_data) {
 static int parse_args(int argc, char *argv[]) {
     // have mode and pci address
     int opt = 0;
+    long tmp;
 
     static struct option long_options[] = {
         {"mode",      required_argument,       0,  'm' },
@@ -116,11 +102,15 @@ static int parse_args(int argc, char *argv[]) {
         {"server_mac", required_argument, 0, 'e'},
         {"client_ip", required_argument, 0, 'i'},
         {"server_ip", required_argument, 0, 's'},
+        {"num_segments", optional_argument, 0, 'k'},
+        {"segment_size", optional_argument, 0, 'l'},
+        {"array_size", optional_argument, 0, 'a'},
+        {"zero_copy", no_argument, 0, 'z'},
         {0,           0,                 0,  0   }
     };
     int long_index = 0;
     int ret;
-    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:",
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:l:a:z:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
             case 'm':
@@ -166,7 +156,21 @@ static int parse_args(int argc, char *argv[]) {
                     return -EINVAL;
                 }
                 break;
-
+            case 'k': // num_segments
+                str_to_long(optarg, &tmp);
+                num_segments = tmp;
+                break;
+            case 'l': // segment_size
+                str_to_long(optarg, &tmp);
+                segment_size = tmp;
+                break;
+            case 'a': // array_size
+                str_to_long(optarg, &tmp);
+                working_set_size = tmp;
+                break;
+            case 'z': // zero_copy
+                zero_copy = 1;
+                break;
             default:
                 NETPERF_WARN("Invalid arguments");
                 exit(EXIT_FAILURE);
@@ -175,149 +179,13 @@ static int parse_args(int argc, char *argv[]) {
     return 0;
 }
 
-int rx_memory_init() {
-    int ret;
-    void *rx_buf;
-    size_t region_len = NUM_BUFS_PER_PAGE * TOTAL_MEMPOOL_PAGES * MBUF_DEFAULT_LEN;
-    rx_buf = mem_map_anom(NULL, region_len, PGSIZE_2MB, 0);
-    if (rx_buf == NULL) { 
-        NETPERF_DEBUG("mem_map_anom failed: resulting buffer is null.");
-        return 1;
-    }
-    ret = mempool_create(&rx_buf_mempool,
-                         rx_buf,
-                         region_len,
-                         PGSIZE_2MB,
-                         MBUF_DEFAULT_LEN);
-    if (ret) {
-        NETPERF_DEBUG("mempool create failed: %d", ret);
-        return ret;
-    }
-    
-    return ret;
-}
-
-int tx_memory_init() {
-    int ret;
-    void *tx_buf;
-    size_t region_len = NUM_BUFS_PER_PAGE * TOTAL_MEMPOOL_PAGES * MBUF_DEFAULT_LEN;
-    tx_buf = mem_map_anom(NULL, region_len, PGSIZE_2MB, 0);
-    if (tx_buf == NULL) { 
-        NETPERF_DEBUG("mem_map_anom failed: resulting buffer is null.");
-        return 1;
-    }
-    ret = mempool_create(&tx_buf_mempool,
-                         tx_buf,
-                         region_len,
-                         PGSIZE_2MB,
-                         MBUF_DEFAULT_LEN);
-    if (ret) {
-        NETPERF_DEBUG("mempool create failed: %d", ret);
-        return ret;
-    }
-    return 0;
-}
-
-/* borrowed from DPDK */
-int
-ibv_device_to_pci_addr(const struct ibv_device *device,
-			    struct pci_addr *pci_addr)
-{
-	FILE *file;
-	char line[32];
-	char path[strlen(device->ibdev_path) + strlen("/device/uevent") + 1];
-	snprintf(path, sizeof(path), "%s/device/uevent", device->ibdev_path);
-
-	file = fopen(path, "rb");
-	if (!file)
-		return -errno;
-
-	while (fgets(line, sizeof(line), file) == line) {
-		size_t len = strlen(line);
-		int ret;
-
-		/* Truncate long lines. */
-		if (len == (sizeof(line) - 1))
-			while (line[(len - 1)] != '\n') {
-				ret = fgetc(file);
-				if (ret == EOF)
-					break;
-				line[(len - 1)] = ret;
-			}
-		/* Extract information. */
-		if (sscanf(line,
-			   "PCI_SLOT_NAME="
-			   "%04hx:%02hhx:%02hhx.%hhd\n",
-			   &pci_addr->domain,
-			   &pci_addr->bus,
-			   &pci_addr->slot,
-			   &pci_addr->func) == 4) {
-			break;
-		}
-	}
-	fclose(file);
-	return 0;
-}
 
 int mlx5_init_flows(int num_rx_queues) {
     return 0;
 }
 
-int mlx5_init_rxq(int index, struct mlx5_rxq *v) {
-    int i, ret;
-    unsigned char *buf;
-
-	/* Create a CQ */
-	struct ibv_cq_init_attr_ex cq_attr = {
-		.cqe = RQ_NUM_DESC,
-		.channel = NULL,
-		.comp_vector = 0,
-		.wc_flags = IBV_WC_EX_WITH_BYTE_LEN,
-		.comp_mask = IBV_CQ_INIT_ATTR_MASK_FLAGS,
-		.flags = IBV_CREATE_CQ_ATTR_SINGLE_THREADED,
-	};
-	struct mlx5dv_cq_init_attr dv_cq_attr = {
-		.comp_mask = 0,
-	};
-	v->rx_cq = mlx5dv_create_cq(context, &cq_attr, &dv_cq_attr);
-	if (!v->rx_cq) {
-        NETPERF_WARN("Failed to create rx cq");
-        return -errno;
-    }
-
-	/* Create the work queue for RX */
-	struct ibv_wq_init_attr wq_init_attr = {
-		.wq_type = IBV_WQT_RQ,
-		.max_wr = RQ_NUM_DESC,
-		.max_sge = 1,
-		.pd = pd,
-		.cq = ibv_cq_ex_to_cq(v->rx_cq),
-		.comp_mask = 0,
-		.create_flags = 0,
-	};
-	struct mlx5dv_wq_init_attr dv_wq_attr = {
-		.comp_mask = 0,
-	};
-	v->rx_wq = mlx5dv_create_wq(context, &wq_init_attr, &dv_wq_attr);
-	if (!v->rx_wq) {
-        NETPERF_ERROR("Failed to create rx work queue");
-        return -errno;
-    }
-    	
-    if (wq_init_attr.max_wr != RQ_NUM_DESC) {
-		NETPERF_WARN("Ring size is larger than anticipated");
-    }
-
-	/* Set the WQ state to ready */
-	struct ibv_wq_attr wq_attr = {0};
-	wq_attr.attr_mask = IBV_WQ_ATTR_STATE;
-	wq_attr.wq_state = IBV_WQS_RDY;
-	ret = ibv_modify_wq(v->rx_wq, &wq_attr);
-	if (ret) {
-        NETPERF_WARN("Could not modify wq with wq_attr while setting up rx queue")
-		return -ret;
-    }
-
+int mlx5_qs_init_flows(struct mlx5_rxq *v)
+{
 	struct ibv_wq *ind_tbl[1] = {v->rx_wq};
 	struct ibv_rwq_ind_table_init_attr rwq_attr = {0};
 	rwq_attr.ind_tbl = ind_tbl;
@@ -329,12 +197,11 @@ int mlx5_init_rxq(int index, struct mlx5_rxq *v) {
 		return -errno;
     }
 
-	static unsigned char rss_key[40];
 	struct ibv_rx_hash_conf rss_cnf = {
 		.rx_hash_function = IBV_RX_HASH_FUNC_TOEPLITZ,
 		.rx_hash_key_len = ARRAY_SIZE(rss_key),
 		.rx_hash_key = rss_key,
-		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_TCP | IBV_RX_HASH_DST_PORT_TCP,
+		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_UDP | IBV_RX_HASH_DST_PORT_UDP,
 	};
 
 	struct ibv_qp_init_attr_ex qp_ex_attr = {
@@ -388,73 +255,8 @@ int mlx5_init_rxq(int index, struct mlx5_rxq *v) {
             }
         }
     };
-    rte_memcpy(&flow_attr.spec_eth.val.dst_mac, &our_eth, 6);
+    rte_memcpy(&flow_attr.spec_eth.val.dst_mac, our_eth, 6);
     
-    
-
-	/* expose direct verbs objects */
-	struct mlx5dv_obj obj = {
-		.cq = {
-			.in = ibv_cq_ex_to_cq(v->rx_cq),
-			.out = &v->rx_cq_dv,
-		},
-		.rwq = {
-			.in = v->rx_wq,
-			.out = &v->rx_wq_dv,
-		},
-	};
-	ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ | MLX5DV_OBJ_RWQ);
-	if (ret) {
-        NETPERF_WARN("Failed to init rx mlx5dv_obj");
-		return -ret;
-    }
-
-	PANIC_ON_TRUE(!is_power_of_two(v->rx_wq_dv.stride), "Stride not power of two; stride: %d", v->rx_wq_dv.stride);
-	PANIC_ON_TRUE(!is_power_of_two(v->rx_cq_dv.cqe_size), "CQE size not power of two");
-	v->rx_wq_log_stride = __builtin_ctz(v->rx_wq_dv.stride);
-	v->rx_cq_log_stride = __builtin_ctz(v->rx_cq_dv.cqe_size);
-
-	/* allocate list of posted buffers */
-	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->rx_wq_dv.wqe_cnt * sizeof(void *));
-	if (!v->buffers) {
-        NETPERF_WARN("Failed to alloc rx posted buffers");
-		return -ENOMEM;
-    }
-
-	v->rxq.consumer_idx = &v->consumer_idx;
-	v->rxq.descriptor_table = v->rx_cq_dv.buf;
-	v->rxq.nr_descriptors = v->rx_cq_dv.cqe_cnt;
-	v->rxq.descriptor_log_size = __builtin_ctz(sizeof(struct mlx5_cqe64));
-	v->rxq.parity_byte_offset = offsetof(struct mlx5_cqe64, op_own);
-	v->rxq.parity_bit_mask = MLX5_CQE_OWNER_MASK;
-
-	/* set byte_count and lkey for all descriptors once */
-	struct mlx5dv_rwq *wq = &v->rx_wq_dv;
-	for (i = 0; i < wq->wqe_cnt; i++) {
-		struct mlx5_wqe_data_seg *seg = wq->buf + i * wq->stride;
-		seg->byte_count =  htobe32(NET_MTU + RX_BUF_TAIL);
-		seg->lkey = htobe32(mr_rx->lkey);
-
-		/* fill queue with buffers */
-		buf = mempool_alloc(&rx_buf_mempool);
-		if (!buf)
-			return -ENOMEM;
-
-		seg->addr = htobe64((unsigned long)buf + RX_BUF_HEAD);
-		v->buffers[i] = buf;
-		v->wq_head++;
-	}
-
-	/* set ownership of cqes to "hardware" */
-	struct mlx5dv_cq *cq = &v->rx_cq_dv;
-	for (i = 0; i < cq->cqe_cnt; i++) {
-		struct mlx5_cqe64 *cqe = cq->buf + i * cq->cqe_size;
-		mlx5dv_set_cqe_owner(cqe, 1);
-	}
-
-	udma_to_device_barrier();
-	wq->dbrec[0] = htobe32(v->wq_head & 0xffff);
-
     // Do some minimal RSS stuff so we receive packets
     eth_flow = ibv_create_flow(v->qp, &flow_attr.attr);
     if (!eth_flow) {
@@ -465,6 +267,12 @@ int mlx5_init_rxq(int index, struct mlx5_rxq *v) {
     return 0;
 }
 
+// TODO:
+//  on the tx side: we will need to actually rewrite the logic here
+//  to dynamically create the work requests based on the number of
+//  scatter-gather elements
+//  what happens if you reach the end of the wqe?? how does the wrap around
+//  happen
 static void mlx5_init_tx_segment(struct mlx5_txq *v, unsigned int idx)
 {
 	int size;
@@ -493,7 +301,7 @@ static void mlx5_init_tx_segment(struct mlx5_txq *v, unsigned int idx)
 	eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
 
 	/* set dpseg */
-	dpseg->lkey = htobe32(mr_tx->lkey);
+	dpseg->lkey = htobe32(tx_mr->lkey);
 }
 
 int mlx5_init_txq(int index, struct mlx5_txq *v) {
@@ -608,97 +416,97 @@ int mlx5_init_txq(int index, struct mlx5_txq *v) {
 
 int init_mlx5() {
     int ret = 0;
-    int i = 0;
-
-    struct ibv_device **dev_list;
-	struct mlx5dv_context_attr attr = {0};
-	struct pci_addr pci_addr;
-
-    // initialize rx and tx memory
-    ret = rx_memory_init();
-    if (ret) {
-        return ret;
-    }
-
-    ret = tx_memory_init();
-    if (ret) {
-        return ret;
-    }
-
-	dev_list = ibv_get_device_list(NULL);
-	if (!dev_list) {
-		perror("Failed to get IB devices list");
-		return -1;
-	}
-
-	for (i = 0; dev_list[i]; i++) {
-		if (strncmp(ibv_get_device_name(dev_list[i]), "mlx5", 4))
-			continue;
-
-		if (!cfg_pci_addr_specified)
-			break;
-
-		if (ibv_device_to_pci_addr(dev_list[i], &pci_addr)) {
-			NETPERF_WARN("failed to read pci addr for %s, skipping",
-				     ibv_get_device_name(dev_list[i]));
-			continue;
-		}
-
-		if (memcmp(&pci_addr, &nic_pci_addr, sizeof(pci_addr)) == 0)
-			break;
-	}
-
-	if (!dev_list[i]) {
-		NETPERF_ERROR("mlx5_init: IB device not found");
-		return -1;
-	}
-
-	attr.flags = 0;
-	context = mlx5dv_open_device(dev_list[i], &attr);
-	if (!context) {
-	    NETPERF_ERROR("mlx5_init: Couldn't get context for %s (errno %d)",
-			ibv_get_device_name(dev_list[i]), errno);
-		return -1;
-	}
-
-	ibv_free_device_list(dev_list);
-
-	/*ret = mlx5dv_set_context_attr(context,
-		  MLX5DV_CTX_ATTR_BUF_ALLOCATORS, &dv_allocators);
-	if (ret) {
-		NETPERF_ERROR("mlx5_init: error setting memory allocator");
-		return -1;
-	}*/
-
-	pd = ibv_alloc_pd(context);
-	if (!pd) {
-		NETPERF_ERROR("mlx5_init: Couldn't allocate PD");
-		return -1;
-	}
-
-    /* Register memory for TX buffers */
-    mr_tx = ibv_reg_mr(pd, tx_buf_mempool.buf, tx_buf_mempool.len, IBV_ACCESS_LOCAL_WRITE);
-    if (!mr_tx) {
-        NETPERF_ERROR("mlx5_init: Failed to register tx mr");
-        return -1;
-    }
     
-    /* Register memory for RX buffers */
-    mr_rx = ibv_reg_mr(pd, rx_buf_mempool.buf, rx_buf_mempool.len, IBV_ACCESS_LOCAL_WRITE);
-    if (!mr_rx) {
-        NETPERF_ERROR("mlx5_init: Failed to register rx mr");
-        return -1;
+    ret = init_ibv_context(&context, &pd, &nic_pci_addr);
+    RETURN_ON_ERR(ret, "Failed to init ibv context: %s", strerror(errno));
+
+    // Alloc memory pool for TX mbuf structs
+    ret = mempool_memory_init(&mbuf_mempool,
+                                CONTROL_MBUFS_SIZE,
+                                CONTROL_MBUFS_PER_PAGE,
+                                REQ_MBUFS_PAGES);
+    RETURN_ON_ERR(ret, "Failed to init mbuf mempool: %s", strerror(errno));
+
+    if (mode == UDP_CLIENT) {
+        // init rx and tx memory mempools
+        ret = mempool_memory_init(&tx_buf_mempool,
+                                    REQ_MBUFS_SIZE,
+                                    REQ_MBUFS_PER_PAGE,
+                                    REQ_MBUFS_PAGES);
+        RETURN_ON_ERR(ret, "Failed to init tx mempool for client: %s", strerror(errno));
+
+        ret = memory_registration(pd, 
+                                    &tx_mr, 
+                                    tx_buf_mempool.buf, 
+                                    tx_buf_mempool.len, 
+                                    IBV_ACCESS_LOCAL_WRITE);
+        RETURN_ON_ERR(ret, "Failed to run memory registration for tx buffer for client: %s", strerror(errno));
+
+        ret = mempool_memory_init(&rx_buf_mempool,
+                                    DATA_MBUFS_SIZE,
+                                    DATA_MBUFS_PER_PAGE,
+                                    DATA_MBUFS_PAGES);
+        RETURN_ON_ERR(ret, "Failed to int rx mempool for client: %s", strerror(errno));
+
+        ret = memory_registration(pd, 
+                                    &rx_mr, 
+                                    rx_buf_mempool.buf, 
+                                    rx_buf_mempool.len, 
+                                    IBV_ACCESS_LOCAL_WRITE);
+        RETURN_ON_ERR(ret, "Failed to run memory reg for client rx region: %s", strerror(errno));
+    } else {
+        ret = server_memory_init(&server_working_set, working_set_size);
+        RETURN_ON_ERR(ret, "Failed to init server working set memory");
+
+        /* Recieve packets are request side on the server */
+        ret = mempool_memory_init(&rx_buf_mempool,
+                                    REQ_MBUFS_SIZE,
+                                    REQ_MBUFS_PER_PAGE,
+                                    REQ_MBUFS_PAGES);
+        RETURN_ON_ERR(ret, "Failed to int rx mempool for server: %s", strerror(errno));
+
+        ret = memory_registration(pd, 
+                                    &rx_mr, 
+                                    rx_buf_mempool.buf, 
+                                    rx_buf_mempool.len, 
+                                    IBV_ACCESS_LOCAL_WRITE);
+        RETURN_ON_ERR(ret, "Failed to run memory reg for client rx region: %s", strerror(errno));
+        if (!zero_copy) {
+            // initialize tx buffer memory pool for network packets
+            ret = mempool_memory_init(&tx_buf_mempool,
+                                       DATA_MBUFS_SIZE,
+                                       DATA_MBUFS_PER_PAGE,
+                                       DATA_MBUFS_PAGES);
+            RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
+
+            ret = memory_registration(pd, 
+                                        &tx_mr, 
+                                        tx_buf_mempool.buf, 
+                                        tx_buf_mempool.len, 
+                                        IBV_ACCESS_LOCAL_WRITE);
+
+            RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
+        } else {
+            // register the server memory region for zero-copy
+            ret = memory_registration(pd, 
+                                        &tx_mr,
+                                        &server_working_set,
+                                        working_set_size,
+                                        IBV_ACCESS_LOCAL_WRITE);
+            RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno)); 
+        }
     }
 
     // init single rxq and single txq
-    // Here is where, if we ever want more than one rxq/txq, we'd init more n
+    // Here is where, if we ever want more than one rxq/txq, we'd init more
     // the array
-    ret = mlx5_init_rxq(0, &rxqs[0]);
+    ret = mlx5_init_rxq(&rxqs[0], &rx_buf_mempool, context, pd, rx_mr);
+    RETURN_ON_ERR(ret, "Failed to create rxq: %s", strerror(-ret));
+
+    ret = mlx5_qs_init_flows(&rxqs[0]);
     if (ret) {
-        NETPERF_ERROR("Failed to create rxq: %s", strerror(-ret));
-        return ret;
+        NETPERF_ERROR("Failed to init flows for listening");
     }
-    rxq_out[0] = &rxqs[0].rxq;
 
     // do we need to install ANY rules for plain packets to show up?
     /*ret = mlx5_init_flows(NUM_QUEUES);
@@ -913,21 +721,21 @@ int mlx5_gather_rx(struct mbuf **ms, unsigned int budget)
 	if (unlikely(!rx_cnt))
 		return rx_cnt;
 
-	ACCESS_ONCE(*rxq_out[0]->shadow_tail) = v->consumer_idx;
-
 	cq->dbrec[0] = htobe32(v->consumer_idx & 0xffffff);
 	PANIC_ON_TRUE(mlx5_refill_rxqueue(v, rx_cnt), "failed to refill rx queue");
+    NETPERF_INFO("Rx cnt: %u", (unsigned)rx_cnt);
 
-	return 0;
+	return rx_cnt;
 }
 
 int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_len, struct eth_addr *our_eth) {
     unsigned char *ptr = mbuf->data;
     struct eth_hdr * const eth = (struct eth_hdr *)ptr;
     ptr += sizeof(struct eth_hdr *);
-    struct ip_hdr * const ip = (struct ip_hdr *)ptr;
+    struct ip_hdr * const ipv4 = (struct ip_hdr *)ptr;
     ptr += sizeof(struct ip_hdr *);
     struct udp_hdr *const udp = (struct udp_hdr *)ptr;
+    ptr += sizeof(struct udp_hdr*);
 
     // check if the dest eth hdr is correct
     if (eth_addr_equal(our_eth, &eth->dhost) != 1) {
@@ -945,7 +753,16 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
         return 0;
     }
 
+    // check IP header
+    if (ipv4->proto != IPPROTO_UDP) {
+        NETPERF_DEBUG("Bad recv type: %u", (unsigned)ipv4->proto);
+    }
+    
+    NETPERF_DEBUG("Ipv4 checksum: %u, udp checksum: %u", (unsigned)(ntohs(ipv4->chksum)), (unsigned)(ntohs(udp->chksum)));
+
     // TODO: finish checks
+    *payload_out = (void *)ptr;
+    *payload_len = mbuf_length(mbuf) - FULL_HEADER_SIZE;
     return 1;
 
 }
@@ -960,7 +777,7 @@ int do_client() {
     // received
     unsigned char *data = (unsigned char *)mempool_alloc(&tx_buf_mempool);
     struct mbuf *mbuf = &MBUFS[0];
-    mbuf_init(mbuf, data, MBUF_DEFAULT_LEN, 0);
+    mbuf_init(mbuf, data, 1024, 0);
     
     // fill in the mbuf
     struct eth_hdr *eth = mbuf_put_hdr(mbuf, struct eth_hdr);
@@ -987,20 +804,18 @@ int do_client() {
     ipv4->chksum = 0;
     ipv4->saddr = htonl(client_ip);
     ipv4->daddr = htonl(server_ip);
-    ipv4->chksum = get_chksum(ipv4);
 
     // fill in the udp header
     udp->src_port = htons(client_port);
     udp->dst_port = htons(server_port);
     udp->len = htons(sizeof(struct udp_hdr));
     udp->chksum = 0;
-    udp->chksum = get_chksum(udp);
 
     // write some data
     memset(data_ptr, 'a', message_size);
 
+    NETPERF_INFO("About to transmit one; ipv4 checksum: %u, udp checksum: %u", (unsigned)(ntohs(ipv4->chksum)), (unsigned)(ntohs(udp->chksum)));
     mlx5_transmit_one(mbuf);
-    NETPERF_INFO("Finished transmit one");
     return 0;
 }
 
@@ -1010,7 +825,7 @@ int do_server() {
     struct mbuf *RECV_MBUFS[32];
     int num_received = 0;
     while (1) {
-        num_received = mlx5_gather_rx(&RECV_MBUFS, 32);
+        num_received = mlx5_gather_rx((struct mbuf **)&RECV_MBUFS, 32);
         if (num_received > 0) {
             // received a packet
             // TODO: check that the data in the mbuf is valid
@@ -1020,7 +835,7 @@ int do_server() {
                 void *payload_out = NULL;
                 uint32_t payload_len = 0;
                 if (check_valid_packet(pkt, &payload_out, &payload_len, &server_mac) == 1) {
-                    NETPERF_DEBUG("Received valid pkt!");
+                    NETPERF_DEBUG("Received valid pkt with length: %u", (unsigned)payload_len);
                 }
                 mbuf_free(pkt);
             }
