@@ -22,6 +22,7 @@
 #define RUNTIME_RX_BATCH_SIZE		32
 #define SQ_CLEAN_THRESH			RUNTIME_RX_BATCH_SIZE
 #define SQ_CLEAN_MAX			SQ_CLEAN_THRESH
+#define BURST_SIZE           32
 /* space for the mbuf struct */
 #define RX_BUF_HEAD \
  (align_up(sizeof(struct mbuf), 2 * CACHE_LINE_SIZE))

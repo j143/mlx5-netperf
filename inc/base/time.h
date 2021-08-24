@@ -14,6 +14,47 @@
 extern int cycles_per_us;
 extern uint64_t start_tsc; 
 
+static inline uint64_t cycles_to_us(uint64_t a)
+{
+    return a / cycles_per_us;
+}
+
+static inline uint64_t us_to_cycles(uint64_t a)
+{
+    return a * cycles_per_us;
+}
+
+static inline uint64_t cycles_offset(uint64_t base)
+{
+    return (rdtsc() - start_tsc) - base;
+}
+
+static inline uint64_t cycles_intersend(uint64_t rate_pps)
+{
+    return (ONE_SECOND / rate_pps) * (cycles_per_us);
+}
+
+static inline uint64_t time_intersend(uint64_t rate_pps)
+{
+    return ONE_SECOND / rate_pps;
+}
+
+/** 
+ * Converts seconds to cycles
+ */
+static inline uint64_t seconds_to_cycles(uint64_t sec)
+{
+    return sec * cycles_per_us * ONE_SECOND;
+}
+
+/**
+ * Return the number of cycles since program init.
+ * */
+static inline uint64_t microcycles(void)
+{
+    return rdtsc() - start_tsc;
+}
+
 /**
  * microtime - gets the number of microseconds since the process started
  * This routine is very inexpensive, even compared to clock_gettime().
@@ -43,3 +84,10 @@ static inline void delay_ms(uint64_t ms)
 	/* TODO: yield instead of spin */
 	__time_delay_us(ms * ONE_MS);
 }
+
+/**
+ * time_init - global time initialization
+ *
+ * Returns 0 if successful, otherwise fail.
+ */
+extern int time_init(void);

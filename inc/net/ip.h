@@ -52,17 +52,6 @@
 
 extern char *ip_addr_to_str(uint32_t addr, char *str);
 
-int str_to_ip(const char *str, uint32_t *addr)
-{
-	uint8_t a, b, c, d;
-	if(sscanf(str, "%hhu.%hhu.%hhu.%hhu", &a, &b, &c, &d) != 4) {
-		return -EINVAL;
-	}
-
-	*addr = MAKE_IP_ADDR(a, b, c, d);
-	return 0;
-}
-
 /*
  * Structure of an internet header, naked of options.
  */

@@ -15,6 +15,7 @@
 #include <base/atomic.h>
 #include <base/list.h>
 #include <base/debug.h>
+#include <base/rte_memcpy.h>
 
 
 struct mbuf {
@@ -247,6 +248,12 @@ static inline void mbuf_init(struct mbuf *m, unsigned char *head,
 	m->len = 0;
 }
 
+static inline void mbuf_copy(struct mbuf *m, char *source, size_t len, size_t off) {
+    NETPERF_ASSERT((m->len + len) < m->head_len, "Not enough space left in mbuf");
+    //NETPERF_DEBUG("Copying %u bytes from %p to %p", (unsigned)len, source, m->data);
+    rte_memcpy((char *)m->data + off, source, len);
+    m->len += len;
+}
 /**
  * mbuf_free - frees an mbuf back to an allocator
  * @m: the mbuf to free

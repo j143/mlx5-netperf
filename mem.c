@@ -20,13 +20,14 @@
 #include <base/limits.h>
 #include <base/debug.h>
 
-#if !defined(MAP_HUGE_2MB) || !defined(MAP_HUGE_1GB)
+// TODO: uncomment back these warnings
+/*#if !defined(MAP_HUGE_2MB) || !defined(MAP_HUGE_1GB)
 #warning "Your system does not support specifying MAP_HUGETLB page sizes"
 #endif
 
 #if !defined(SHM_HUGE_2MB) || !defined(SHM_HUGE_1GB)
 #warning "Your system does not support specifying SHM_HUGETLB page sizes"
-#endif
+#endif*/
 
 
 long mbind(void *start, size_t len, int mode,

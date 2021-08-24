@@ -2,7 +2,8 @@ ROOT_PATH=.
 
 # shared toolchain definitions
 INC = -I$(ROOT_PATH)/inc
-CFLAGS  = -g -Wall -D_GNU_SOURCE $(INC) -lm -lstdc++
+CFLAGS  = -g -Wall -D_GNU_SOURCE $(INC) -lstdc++
+EXTRA_CFLAGS = -lm
 LDFLAGS_SHARED = 
 LDFLAGS_STATIC = 
 LD      = gcc
@@ -33,7 +34,7 @@ base_src = $(wildcard base/*.c)
 base_obj = $(base_src:.c=.o)
 
 # main - the main binary
-SRCS-y := main.c mlx5_init.c mempool.c mem.c pci.c bitmap.c sysfs.c mbuf.c
+SRCS-y := main.c mlx5_init.c latency.c requests.c time.c mempool.c mem.c pci.c bitmap.c sysfs.c mbuf.c
 
 all: shared
 .PHONY: shared static
@@ -43,10 +44,10 @@ static: export build/$(APP)-static
 	ln -sf $(APP)-static build/$(APP)
 
 build/$(APP)-shared: $(SRCS-y) Makefile | build
-	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
+	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(EXTRA_CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED)
 
 build/$(APP)-static: $(SRCS-y) Makefile | build
-	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_STATIC)
+	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(EXTRA_CFLAGS) $(LDFLAGS) $(LDFLAGS_STATIC)
 
 build:
 	@mkdir -p $@

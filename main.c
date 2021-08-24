@@ -13,9 +13,13 @@
 #include <net/udp.h>
 #include <netinet/in.h>
 
+#include <asm/ops.h>
 #include <base/debug.h>
+#include <base/time.h>
 #include <base/parse.h>
 #include <base/mem.h>
+#include <base/request.h>
+#include <base/latency.h>
 #include <base/compiler.h>
 #include <base/mempool.h>
 #include <base/mbuf.h>
@@ -30,6 +34,8 @@
 #include <mlx5_init.h>
 #include <infiniband/verbs.h>
 #include <infiniband/mlx5dv.h>
+#include <base/latency.h>
+
 /**********************************************************************/
 // CONSTANTS
 /**********************************************************************/
@@ -50,6 +56,13 @@ static size_t segment_size = 1024;
 static size_t working_set_size = 16384;
 static int zero_copy = 0;
 static int client_specified = 0;
+static int has_latency_log = 1;
+static char *latency_log;
+static RateDistribution rate_distribution = {.type = UNIFORM, .rate_pps = 5000, .total_time = 2};
+static ClientRequest *client_requests = NULL; // pointer to client request information
+static OutgoingHeader header = {}; // header to copy in to the request
+static Latency_Dist_t latency_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+static Packet_Map_t packet_map = {.total_count = 0, .grouped_rtts = NULL, .sent_ids = NULL };
 
 static struct mempool rx_buf_mempool;
 static struct mempool tx_buf_mempool;
@@ -66,24 +79,6 @@ static size_t max_inline_data = 256;
 static uint32_t total_dropped;
 
 /**********************************************************************/
-/*
- * simple_alloc - simple memory allocator for internal MLX5 structures
- */
-/*static void *simple_alloc(size_t size, void *priv_data)
-{
-    return malloc(size);
-}
-
-static void simple_free(void *ptr, void *priv_data) {
-    free(ptr);
-}*/
-
-// TODO: this was to put the rx ring in shared memory to enable work stealing.
-/*static struct mlx5dv_ctx_allocators dv_allocators = {
-	.alloc = simple_alloc,
-	.free = simple_free,
-};*/
-
 static int parse_args(int argc, char *argv[]) {
     // have mode and pci address
     int opt = 0;
@@ -97,14 +92,17 @@ static int parse_args(int argc, char *argv[]) {
         {"client_ip", required_argument, 0, 'i'},
         {"server_ip", required_argument, 0, 's'},
         {"num_segments", optional_argument, 0, 'k'},
-        {"segment_size", optional_argument, 0, 'l'},
+        {"segment_size", optional_argument, 0, 'q'},
+        {"rate", optional_argument, 0, 'r'},
+        {"time", optional_argument, 0, 't'},
         {"array_size", optional_argument, 0, 'a'},
+        {"latency_log", optional_argument, 0, 'l'},
         {"zero_copy", no_argument, 0, 'z'},
         {0,           0,                 0,  0   }
     };
     int long_index = 0;
     int ret;
-    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:l:a:z:",
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
             case 'm':
@@ -155,7 +153,7 @@ static int parse_args(int argc, char *argv[]) {
                 str_to_long(optarg, &tmp);
                 num_segments = tmp;
                 break;
-            case 'l': // segment_size
+            case 'q': // segment_size
                 str_to_long(optarg, &tmp);
                 segment_size = tmp;
                 break;
@@ -166,11 +164,75 @@ static int parse_args(int argc, char *argv[]) {
             case 'z': // zero_copy
                 zero_copy = 1;
                 break;
+            case 'r': // rate
+                str_to_long(optarg, &tmp);
+                rate_distribution.rate_pps = tmp;
+                break;
+            case 't': // total_time
+                str_to_long(optarg, &tmp);
+                rate_distribution.total_time = tmp;
+                break;
+            case 'l':
+                has_latency_log = 1;
+                latency_log = (char *)malloc(strlen(optarg));
+                strcpy(latency_log, optarg);
+                break;
             default:
                 NETPERF_WARN("Invalid arguments");
                 exit(EXIT_FAILURE);
         }
     }
+    return 0;
+}
+
+/**
+ * Initializes data for the actual workload.
+ * On the client side: initializes the client requests and the outgoing header.
+ * On the server side: if there is a single client, initializes the server
+ * memory region.
+ */
+int init_workload() {
+    int ret = 0;
+
+    if (mode == UDP_CLIENT) {
+        // timestamp, packet id, 1 uint64_t per segment
+        size_t client_payload_size = sizeof(uint64_t) * ( 2 + num_segments );
+        ret = initialize_outgoing_header(&header,
+                                    &client_mac,
+                                    &server_mac,
+                                    client_ip,
+                                    server_ip,
+                                    client_port,
+                                    server_port,
+                                    client_payload_size);
+        RETURN_ON_ERR(ret, "Failed to initialize outgoing header");
+        ret = initialize_client_requests(&client_requests,
+                                            &rate_distribution,
+                                            segment_size,
+                                            num_segments,
+                                            working_set_size);
+        RETURN_ON_ERR(ret, "Failed to initialize client requests: %s", strerror(-errno));
+    } else {
+        // num_segments * segment_size
+        size_t server_payload_size = ( num_segments * segment_size ) - FULL_HEADER_SIZE;
+        if (client_specified) {
+            ret = initialize_outgoing_header(&header,
+                                                &server_mac,
+                                                &client_mac,
+                                                server_ip,
+                                                client_ip,
+                                                server_port,
+                                                client_port,
+                                                server_payload_size);
+            RETURN_ON_ERR(ret, "Failed to initialize server header");
+            ret = initialize_server_memory(server_working_set,
+                                            segment_size,
+                                            working_set_size,
+                                            &header);
+            RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
+        }
+    }
+
     return 0;
 }
 
@@ -325,7 +387,6 @@ int mlx5_gather_completions(struct mbuf **mbufs, struct mlx5_txq *v, unsigned in
  * mlx5_transmit_one - send one mbuf
  * @m: mbuf to send
  *
- * uses local kthread tx queue
  * returns 0 on success, -1 on error
  */
 int mlx5_transmit_one(struct mbuf *m)
@@ -342,6 +403,7 @@ int mlx5_transmit_one(struct mbuf *m)
 	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
 		for (i = 0; i < compl; i++)
+            // TODO: how does this know what to even do???
 			mbuf_free(mbs[i]);
 		if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
             NETPERF_WARN("txq full");
@@ -377,6 +439,14 @@ int mlx5_transmit_one(struct mbuf *m)
 
 	return 0;
 
+}
+
+void tx_completion(struct mbuf *m) {
+    // free the backing store
+    mempool_free(&tx_buf_mempool, (void *)m->head);
+
+    // free the actual mbuf struct
+    mempool_free(&mbuf_mempool, (void *)m);
 }
 
 void rx_completion(struct mbuf *m) {
@@ -492,13 +562,14 @@ int mlx5_gather_rx(struct mbuf **ms, unsigned int budget)
 }
 
 int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_len, struct eth_addr *our_eth) {
+    NETPERF_DEBUG("Mbuf addr: %p, mbuf data addr: %p, diff: %lu, mbuf len: %u", mbuf, mbuf->data, (char *)(mbuf->data) - (char *)mbuf, (unsigned)(mbuf_length(mbuf)));
     unsigned char *ptr = mbuf->data;
     struct eth_hdr * const eth = (struct eth_hdr *)ptr;
-    ptr += sizeof(struct eth_hdr *);
+    ptr += sizeof(struct eth_hdr);
     struct ip_hdr * const ipv4 = (struct ip_hdr *)ptr;
-    ptr += sizeof(struct ip_hdr *);
+    ptr += sizeof(struct ip_hdr);
     struct udp_hdr *const udp = (struct udp_hdr *)ptr;
-    ptr += sizeof(struct udp_hdr*);
+    ptr += sizeof(struct udp_hdr);
 
     // check if the dest eth hdr is correct
     if (eth_addr_equal(our_eth, &eth->dhost) != 1) {
@@ -516,12 +587,13 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
         return 0;
     }
 
+    NETPERF_DEBUG("Valid ethernet header");
     // check IP header
     if (ipv4->proto != IPPROTO_UDP) {
         NETPERF_DEBUG("Bad recv type: %u", (unsigned)ipv4->proto);
     }
     
-    NETPERF_DEBUG("Ipv4 checksum: %u, udp checksum: %u", (unsigned)(ntohs(ipv4->chksum)), (unsigned)(ntohs(udp->chksum)));
+    NETPERF_DEBUG("Ipv4 checksum: %u, Ipv4 ttl: %u, udp checksum: %u", (unsigned)(ntohs(ipv4->chksum)), (unsigned)ipv4->ttl, (unsigned)(ntohs(udp->chksum)));
 
     // TODO: finish checks
     *payload_out = (void *)ptr;
@@ -531,75 +603,135 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
 }
 
 int do_client() {
-    // TX window???
-    struct mbuf MBUFS[32];
-    uint16_t message_size = 100;
-
-
-    // for now: send a SINGLE packet to the other side and make sure it's
-    // received
-    unsigned char *data = (unsigned char *)mempool_alloc(&tx_buf_mempool);
-    struct mbuf *mbuf = &MBUFS[0];
-    mbuf_init(mbuf, data, 1024, 0);
+    NETPERF_DEBUG("Starting client");
+    struct mbuf *recv_pkts[BURST_SIZE];
+    struct mbuf *pkt;
+    size_t client_payload_size = sizeof(uint64_t) * (num_segments + 2);
+    int total_packets_per_request = calculate_total_packets_required((uint32_t)segment_size, (uint32_t)num_segments);
     
-    // fill in the mbuf
-    struct eth_hdr *eth = mbuf_put_hdr(mbuf, struct eth_hdr);
-    struct ip_hdr *ipv4 = mbuf_put_hdr(mbuf, struct ip_hdr);
-    struct udp_hdr *udp = mbuf_put_hdr(mbuf, struct udp_hdr);
-    unsigned char *data_ptr = mbuf_put(mbuf, message_size);
+    size_t num_received = 0;
+    size_t outstanding = 0;
 
-    // fill in the ethernet header
-    ether_addr_copy(&client_mac, &eth->shost);
-    ether_addr_copy(&server_mac, &eth->dhost);
-
-    // TODO: turn these into debug asserts
-    NETPERF_ASSERT(eth_addr_equal(&eth->shost, &client_mac) == 1, "Source addrs not equal");
-    NETPERF_ASSERT(eth_addr_equal(&eth->dhost, &server_mac) == 1, "Dest addrs not equal");
-    eth->type = htons(ETHTYPE_IP);
+    uint64_t total_cycles = seconds_to_cycles(rate_distribution.total_time);
+    uint64_t start_cycle_offset = microcycles(); // for calculating received latencies
+    uint64_t start_time_offset = cycles_to_us(start_cycle_offset);
     
-    // fill in the ipv4 header
-    ipv4->tos = 0x0;
-    ipv4->len = htons(sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + message_size);
-    ipv4->id = htons(1);
-    ipv4->off = 0;
-    ipv4->ttl = 64;
-    ipv4->proto = IPPROTO_UDP;
-    ipv4->chksum = 0;
-    ipv4->saddr = htonl(client_ip);
-    ipv4->daddr = htonl(server_ip);
+    // first client request (first packet sent at time 0)
+    ClientRequest *current_request = get_client_req(client_requests, 0);
 
-    // fill in the udp header
-    udp->src_port = htons(client_port);
-    udp->dst_port = htons(server_port);
-    udp->len = htons(sizeof(struct udp_hdr));
-    udp->chksum = 0;
+    // main processing loop
+    while (microcycles() < (start_cycle_offset + total_cycles)) {
+        // allocate actual mbuf struct
+        pkt = (struct mbuf *)mempool_alloc(&mbuf_mempool);
+        if (pkt == NULL) {
+            NETPERF_WARN("Error allocating mbuf for req # %u; recved %u", (unsigned)current_request->packet_id, (unsigned)num_received);
+            return -ENOMEM;
+        }
 
-    // write some data
-    memset(data_ptr, 'a', message_size);
+        // allocate buffer backing the mbuf
+        unsigned char *buffer = (unsigned char *)mempool_alloc(&tx_buf_mempool);
+        mbuf_init(pkt, buffer, REQ_MBUFS_SIZE, 0);
+        
+        // frees the backing store back to tx_buf_mempool and the actual struct
+        // back to the mbuf_mempool
+        pkt->release = tx_completion;
 
-    NETPERF_INFO("About to transmit one; ipv4 checksum: %u, udp checksum: %u", (unsigned)(ntohs(ipv4->chksum)), (unsigned)(ntohs(udp->chksum)));
-    mlx5_transmit_one(mbuf);
+        // copy data into the mbuf
+        mbuf_copy(pkt, (char *)&header, sizeof(OutgoingHeader), 0);
+        mbuf_copy(pkt, (char *)current_request, client_payload_size, sizeof(OutgoingHeader));
+
+        int sent = -1;
+        NETPERF_DEBUG("Attempting to transmit packet %u (send time %u), outstanding %u", (unsigned)current_request->packet_id, (unsigned)current_request->timestamp_offset, (unsigned)num_received);
+        while (sent != 0) {
+            sent = mlx5_transmit_one(pkt);
+        }
+        
+        outstanding += total_packets_per_request;
+        num_received += 1;
+        current_request += 1;
+
+        while (outstanding > 0) {
+            int nb_rx = mlx5_gather_rx((struct mbuf **)&recv_pkts, 32);
+            if (nb_rx == 0) {
+                // if time to send the next packet, break
+                if (microtime() >= (current_request->timestamp_offset + start_time_offset)) {
+                    break;
+                }
+                continue;
+            }
+
+            // process any received packets
+            for (int i = 0; i < nb_rx; i++) {
+                void *payload;
+                uint32_t payload_len;
+                if (check_valid_packet(recv_pkts[i], &payload, &payload_len, &client_mac) != 1) {
+                    NETPERF_DEBUG("Received invalid packet back");
+                    mbuf_free(recv_pkts[i]);
+                    continue;
+                }
+                NETPERF_ASSERT((payload_len + FULL_HEADER_SIZE) == 
+                                    num_segments * segment_size, 
+                                    "Expected size: %u; actual size: %u", 
+                                    (unsigned)(num_segments * segment_size),
+                                    (unsigned)(payload_len + FULL_HEADER_SIZE));
+
+                // read the timestamp
+                uint64_t timestamp = *(uint64_t *)payload;
+                uint64_t id = *(uint64_t *)((char *)payload + sizeof(uint64_t));
+                uint64_t rtt = microcycles() - start_time_offset - timestamp;
+                add_latency_to_map(&packet_map, rtt, id);
+
+                // free back the received packet
+                mbuf_free(recv_pkts[i]);
+            }
+        }
+
+        // wait till time to send the next packet
+        while (microtime() < (current_request->timestamp_offset + start_time_offset)) {}
+    }
+
+    // dump the packets
+    uint64_t total_time = microtime() - start_time_offset;
+    size_t total_sent = (size_t)current_request->packet_id - 1;
+    free(client_requests);
+    calculate_and_dump_latencies(&packet_map,
+                                    &latency_dist,
+                                    total_sent,
+                                    total_packets_per_request,
+                                    total_time,
+                                    num_segments * segment_size,
+                                    rate_distribution.rate_pps,
+                                    has_latency_log,
+                                    latency_log);
     return 0;
 }
 
 int do_server() {
     NETPERF_DEBUG("Starting do server");
     // poll for receiving packets
-    struct mbuf *RECV_MBUFS[32];
+    struct mbuf *recv_mbufs[BURST_SIZE];
+    // uint64_t segments[MAX_SCATTERS];
+
     int num_received = 0;
     while (1) {
-        num_received = mlx5_gather_rx((struct mbuf **)&RECV_MBUFS, 32);
+        num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, BURST_SIZE);
         if (num_received > 0) {
-            // received a packet
-            // TODO: check that the data in the mbuf is valid
-            NETPERF_DEBUG("Received packets: %d", num_received);
             for (int  i = 0; i < num_received; i++) {
-                struct mbuf *pkt = RECV_MBUFS[i];
+                struct mbuf *pkt = recv_mbufs[i];
                 void *payload_out = NULL;
                 uint32_t payload_len = 0;
-                if (check_valid_packet(pkt, &payload_out, &payload_len, &server_mac) == 1) {
-                    NETPERF_DEBUG("Received valid pkt with length: %u", (unsigned)payload_len);
+                if (check_valid_packet(pkt, 
+                                        &payload_out, 
+                                        &payload_len, 
+                                        &server_mac) != 1) {
+                    NETPERF_DEBUG("Received invalid pkt");
+                    mbuf_free(pkt);
+                    continue;
                 }
+
+                // process the request
+                
+                
                 mbuf_free(pkt);
             }
         }
@@ -610,22 +742,44 @@ int do_server() {
 
 int main(int argc, char *argv[]) {
     int ret = 0;
+    seed_rand();
     NETPERF_DEBUG("In netperf program");
     ret = parse_args(argc, argv);
     if (ret) {
         NETPERF_WARN("parse_args() failed.");
     }
+
+    // Global time initialization
+    ret = time_init();
+    if (ret) {
+        NETPERF_WARN("Time initialization failed.");
+        return ret;
+    }
+
+    // Mlx5 queue and flow initialization
     ret = init_mlx5();
     if (ret) {
         NETPERF_WARN("init_mlx5() failed.");
         return ret;
     }
 
+    // initialize the workload
+    ret = init_workload();
+    if (ret) {
+        NETPERF_WARN("Init of workload failed.");
+        return ret;
+    }
+
     if (mode == UDP_CLIENT) {
-        return do_client();
+        ret = do_client();
+        if (ret) {
+            NETPERF_WARN("Client returned non-zero status.");
+            return ret;
+        }
     } else {
         return do_server();
     }
+
     return ret;
 }
 

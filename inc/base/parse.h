@@ -4,7 +4,7 @@
 #include <errno.h>      /* ERANGE */
 #include <net/ethernet.h>
 
-int str_to_mac(const char *s, struct eth_addr *mac_out) {
+static int str_to_mac(const char *s, struct eth_addr *mac_out) {
     unsigned int values[ETH_ADDR_LEN];
     int ret = sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x%*c", &values[0], &values[1], &values[2], &values[3],&values[4], &values[5]);
     if (6 != ret) {
@@ -19,7 +19,7 @@ int str_to_mac(const char *s, struct eth_addr *mac_out) {
 }
 
 
-int str_to_long(const char *str, long *val)
+static int str_to_long(const char *str, long *val)
 {
 	char *endptr;
 
@@ -29,3 +29,16 @@ int str_to_long(const char *str, long *val)
 		return -EINVAL;
 	return 0;
 }
+
+static int str_to_ip(const char *str, uint32_t *addr)
+{
+	uint8_t a, b, c, d;
+	if(sscanf(str, "%hhu.%hhu.%hhu.%hhu", &a, &b, &c, &d) != 4) {
+		return -EINVAL;
+	}
+
+	*addr = MAKE_IP_ADDR(a, b, c, d);
+	return 0;
+}
+
+
