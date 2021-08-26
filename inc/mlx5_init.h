@@ -32,11 +32,11 @@
 
 // for TX on the client size
 // for RX on the server sie
-#define REQ_MBUFS_SIZE 1024
-#define REQ_MBUFS_PER_PAGE 2048
-#define REQ_MBUFS_PAGES 40
+#define REQ_MBUFS_SIZE 512
+#define REQ_MBUFS_PER_PAGE 4096
+#define REQ_MBUFS_PAGES 120
 
-#define DATA_MBUFS_SIZE 8192
+#define DATA_MBUFS_SIZE 16384
 #define DATA_MBUFS_PER_PAGE 256
 #define DATA_MBUFS_PAGES 40
 

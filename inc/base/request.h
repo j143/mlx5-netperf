@@ -15,14 +15,17 @@
 // CONSTANTS
 #define REQUEST_PADDING 1.20
 #define MAX_SCATTERS    32
+#define ID_OFF          1
+#define SEGLIST_OFFSET     (ID_OFF + 1)
 
 // MACROS
-#define POINTER_SIZE 64
+#define POINTER_SIZE (sizeof(uint64_t))
 #define get_next_ptr(mem, idx) \
     *(get_client_ptr(mem, idx))
 #define get_client_ptr(mem, idx) ((uint64_t *)((char *)mem + ((idx) * POINTER_SIZE)))
-#define get_server_region(memory, idx, segment_size) ((void *)((char *)memory + idx * segment_size))
-#define get_client_req(client_reqs, idx) (ClientRequest *)((char *)client_reqs + idx * (sizeof(ClientRequest)))
+#define get_server_region(memory, idx, segment_size) ((void *)((char *)memory + ((idx) * (segment_size))))
+#define get_client_req(client_reqs, idx) (ClientRequest *)((char *)client_reqs + (size_t)(idx) * (sizeof(ClientRequest)))
+#define read_u64(ptr, offset) *((uint64_t *)((char *)ptr + (offset) * sizeof(uint64_t)))
 /****************************************************************/
 static inline void seed_rand() {
     srand(time(NULL));
@@ -40,8 +43,8 @@ typedef struct RateDistribution {
 
 typedef struct ClientRequest
 {
-    uint64_t timestamp_offset;
-    uint64_t packet_id;
+    uint64_t timestamp_offset; // not actually copied into the client request
+    uint64_t packet_id; // TODO: for some reason it doesnt work without timestamp offset first
     uint64_t segment_offsets[32]; // maximum number of segments we'd be asking for (within array_size)
 } __attribute__((packed)) ClientRequest;
 
@@ -62,7 +65,7 @@ int initialize_outgoing_header(OutgoingHeader *header,
                                 uint16_t dst_port,
                                 size_t payload_size);
 
-/* Get next send time offset from previous (in cycles) */
+/* Get next send time offset from previous (in ns) */
 uint64_t get_next_send_time(uint64_t last_send_time, RateDistribution *rate_distribution);
 
 /* Initialize each region of the server memory to start with the given packet

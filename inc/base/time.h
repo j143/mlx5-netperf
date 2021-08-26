@@ -12,6 +12,7 @@
 #define ONE_US		1
 
 extern int cycles_per_us;
+extern float cycles_per_ns;
 extern uint64_t start_tsc; 
 
 static inline uint64_t cycles_to_us(uint64_t a)
@@ -36,7 +37,7 @@ static inline uint64_t cycles_intersend(uint64_t rate_pps)
 
 static inline uint64_t time_intersend(uint64_t rate_pps)
 {
-    return ONE_SECOND / rate_pps;
+    return ONE_SECOND * 1000 / rate_pps;
 }
 
 /** 
@@ -53,6 +54,17 @@ static inline uint64_t seconds_to_cycles(uint64_t sec)
 static inline uint64_t microcycles(void)
 {
     return rdtsc() - start_tsc;
+}
+
+
+
+/**
+ * microtime - gets the number of microseconds since the process started
+ * This routine is very inexpensive, even compared to clock_gettime().
+ */
+static inline uint64_t nanotime(void)
+{
+	return (uint64_t)((float)(rdtsc() - start_tsc) / (float)cycles_per_ns);
 }
 
 /**

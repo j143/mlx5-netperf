@@ -34,7 +34,7 @@ base_src = $(wildcard base/*.c)
 base_obj = $(base_src:.c=.o)
 
 # main - the main binary
-SRCS-y := main.c mlx5_init.c latency.c requests.c time.c mempool.c mem.c pci.c bitmap.c sysfs.c mbuf.c
+SRCS-y := main.c mlx5_init.c mlx5_rxtx.c latency.c requests.c time.c mempool.c mem.c pci.c bitmap.c sysfs.c 
 
 all: shared
 .PHONY: shared static

@@ -8,6 +8,7 @@
 #include <base/debug.h>
 
 int cycles_per_us __attribute__(( aligned(CACHE_LINE_SIZE) ));
+float cycles_per_ns;
 uint64_t start_tsc;
 
 /**
@@ -44,7 +45,10 @@ static int time_calibrate_tsc(void)
 
 		secs = (double)ns / 1000;
 		cycles_per_us = (uint64_t)((end - start) / secs);
+        cycles_per_ns = (float)((float)(end - start) / (float)ns);
+        NETPERF_INFO("cycles: %lu, time: %lu ns", (end - start), ns);
 		NETPERF_INFO("time: detected %d ticks / us", cycles_per_us);
+        NETPERF_INFO("time: detected %f ticks / ns", cycles_per_ns);
 
 		/* record the start time of the binary */
 		start_tsc = rdtsc();

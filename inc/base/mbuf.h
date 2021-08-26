@@ -23,18 +23,16 @@ struct mbuf {
 	unsigned char	*head;	   /* start of the buffer */
 	unsigned char	*data;	   /* current position within the buffer */
 	unsigned int	head_len;  /* length of the entire buffer from @head */
-	unsigned int	len;	   /* length of the data */
-	unsigned int	csum_type; /* type of checksum */
-	unsigned int	csum;	   /* 16-bit one's complement */
+	unsigned int	len;	   /* length of the data in this mbuf */
+	unsigned int	nb_segs; /* total number of segments */
+	unsigned int	pkt_len;	   /* total packet len */
 
 	union {
 		unsigned int	txflags;  /* TX offload flags */
 		unsigned int	rss_hash; /* RSS 5-tuple hash from HW */
 	};
-
-	unsigned short	network_off;	/* the offset of the network header */
-	unsigned short	transport_off;	/* the offset of the transport header */
-	unsigned long   release_data;	/* data for the release method */
+	
+    unsigned long   release_data;	/* data for the release method (could be used for ref-counting)*/
 	void		(*release)(struct mbuf *m); /* frees the mbuf */
 
 };
@@ -185,51 +183,8 @@ static inline unsigned int mbuf_length(struct mbuf *m)
 #define mbuf_trim_hdr(mbuf, hdr) \
 	(typeof(hdr) *)mbuf_trim(mbuf, sizeof(hdr))
 
-/**
- * mbuf_mark_network_offset - sets the network offset to the data pointer
- * @m: the mbuf in which to set the network offset
- */
-static inline void mbuf_mark_network_offset(struct mbuf *m)
-{
-	ptrdiff_t off = m->data - m->head;
-	assert(off <= USHRT_MAX);
-	m->network_off = off;
-}
-
-/**
- * mbuf_mark_transport_offset - sets the transport offset to the data pointer
- * @m: the mbuf in which to set the transport offset
- */
-static inline void mbuf_mark_transport_offset(struct mbuf *m)
-{
-	ptrdiff_t off = m->data - m->head;
-	assert(off <= USHRT_MAX);
-	m->transport_off = off;
-}
-
-/**
- * mbuf_network_offset - returns a pointer to the network header
- * @m: the mbuf containing the network offset
- */
-static inline unsigned char *mbuf_network_offset(struct mbuf *m)
-{
-	return m->head + m->network_off;
-}
-
-/**
- * mbuf_network_offset - returns a pointer to the transport header
- * @m: the mbuf containing the transport offset
- */
-static inline unsigned char *mbuf_transport_offset(struct mbuf *m)
-{
-	return m->head + m->transport_off;
-}
-
-#define mbuf_network_hdr(mbuf, hdr) \
-	(typeof(hdr) *)mbuf_network_offset(mbuf)
-
-#define mbuf_transport_hdr(mbuf, hdr) \
-	(typeof(hdr) *)mbuf_transport_offset(mbuf)
+#define mbuf_offset(mbuf, off, t) \
+    (t)(mbuf_offset_ptr(mbuf, off))
 
 /**
  * mbuf_init - initializes an mbuf
@@ -248,9 +203,13 @@ static inline void mbuf_init(struct mbuf *m, unsigned char *head,
 	m->len = 0;
 }
 
+static inline unsigned char * mbuf_offset_ptr(struct mbuf *m, size_t off) {
+    return m->data + off;
+}
+
 static inline void mbuf_copy(struct mbuf *m, char *source, size_t len, size_t off) {
     NETPERF_ASSERT((m->len + len) < m->head_len, "Not enough space left in mbuf");
-    //NETPERF_DEBUG("Copying %u bytes from %p to %p", (unsigned)len, source, m->data);
+    //NETPERF_DEBUG("Copying from %p into %p, withn len %u", source, (char *)m->data + off, (unsigned)len);
     rte_memcpy((char *)m->data + off, source, len);
     m->len += len;
 }
@@ -262,6 +221,3 @@ static inline void mbuf_free(struct mbuf *m)
 {
 	m->release(m);
 }
-
-struct mbuf *mbuf_clone(struct mbuf *dst, struct mbuf *src);
-

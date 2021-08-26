@@ -121,7 +121,7 @@ int initialize_pointer_chasing_at_client(uint64_t **pointer_segments,
 
     for (size_t i = 1; i < len; i++) {
         uint64_t *ptr = get_client_ptr(pointers, i - 1);
-        NETPERF_ASSERT(((char *)ptr - (char *)pointers) == 64 * (i - 1), "Ptr not in right place");
+        NETPERF_ASSERT(((char *)ptr - (char *)pointers) == POINTER_SIZE * (i - 1), "Ptr not in right place");
         *ptr = indices[i];
     }
 
@@ -158,7 +158,6 @@ int initialize_client_requests(ClientRequest **client_requests_ptr,
     }
 
     struct ClientRequest *current_req = (struct ClientRequest *)client_requests;
-    size_t num_segments_within_region = array_size / segment_size;
     uint64_t cur_region_idx = 0;
     uint64_t cur_timestamp = 0;
     for (size_t iter = 0; iter < num_requests; iter++) {
@@ -168,7 +167,11 @@ int initialize_client_requests(ClientRequest **client_requests_ptr,
             current_req->segment_offsets[i] = cur_region_idx;
             // get next pointer in chase
             cur_region_idx = get_next_ptr(indices, cur_region_idx);
-            NETPERF_ASSERT(cur_region_idx < num_segments_within_region, "Calculated out of bounds pointer index in chase: %u", (unsigned)cur_region_idx);
+            NETPERF_DEBUG("pkt id: %u, segment: %u, region: %lu",
+                    (unsigned)iter,
+                    (unsigned)i,
+                    cur_region_idx);
+            NETPERF_ASSERT(cur_region_idx < (array_size / segment_size), "Calculated out of bounds pointer index in chase: %u", (unsigned)cur_region_idx);
         }
         // increment to the next time to send a packet
         cur_timestamp = get_next_send_time(cur_timestamp, rate_distribution);

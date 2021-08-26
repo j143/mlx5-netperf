@@ -1,4 +1,3 @@
-#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <signal.h>
@@ -16,6 +15,7 @@
 
 #include <base/latency.h>
 #include <base/debug.h>
+#include <base/time.h>
 
 int calculate_total_packets_required(uint32_t seg_size, uint32_t nb_segs) {
     if (seg_size > MAX_SEGMENT_SIZE) {
@@ -43,6 +43,8 @@ int calculate_and_dump_latencies(Packet_Map_t *packet_map,
                                     char *latency_log)
 {
     int ret = 0;
+    float total_time_float = (float)total_time / ((float)ONE_SECOND * 1000);
+    printf("Ran for %f seconds, sent %lu packets.\n", total_time_float, num_sent);
     ret = calculate_latencies(packet_map, 
                                 latency_dist, 
                                 num_sent, 
@@ -135,7 +137,7 @@ int calculate_latencies(Packet_Map_t *map, Latency_Dist_t *dist, size_t num_sent
             add_latency(dist, max_rtt);
         }
     }
-    NETPERF_INFO("Num fully received: %d, packets per bucket: %u, total_count: %u.", num_valid, (unsigned)num_per_bucket, (unsigned)map->total_count);
+    printf("Num fully received: %d, packets per bucket: %u, total_count: %u.\n", num_valid, (unsigned)num_per_bucket, (unsigned)map->total_count);
     return 0;
 }
 
@@ -194,10 +196,12 @@ int dump_latencies(Latency_Dist_t *dist,
         uint64_t p99 = arr[(size_t)((double)dist->total_count * 0.99)];
         uint64_t p999 = arr[(size_t)((double)dist->total_count * 0.999)];
     
-        float achieved_rate = (float)(dist->total_count) / (float)total_time * (float)(message_size) * 8.0 / (float)1e9;
+        NETPERF_INFO("total ct: %lu, total_time: %lu, message_size: %lu", dist->total_count, total_time, message_size);
+        float achieved_rate_pps = (float)(dist->total_count) / ((float)total_time / (float)1e9);
+        float achieved_rate = rate_gbps(achieved_rate_pps, message_size);
         float percent_rate = achieved_rate / rate_gbps;
-        printf("Stats:\n\t- Min latency: %u ns\n\t- Max latency: %u ns\n\t- Avg latency: %" PRIu64 " ns", (unsigned)dist->min, (unsigned)dist->max, avg_latency);
-        printf("\n\t- Median latency: %u ns\n\t- p99 latency: %u ns\n\t- p999 latency: %u ns", (unsigned)median, (unsigned)p99, (unsigned)p999);
+        printf("Stats:\n\t- Min latency: %lu ns\n\t- Max latency: %lu ns\n\t- Avg latency: %lu ns", dist->min, dist->max, avg_latency);
+        printf("\n\t- Median latency: %lu ns\n\t- p99 latency: %lu ns\n\t- p999 latency: %lu ns", median, p99, p999);
         printf("\n\t- Achieved Goodput: %0.4f Gbps ( %0.4f %% ) \n", achieved_rate, percent_rate);
     } else {
         FILE *fp = fopen(latency_log, "w");
