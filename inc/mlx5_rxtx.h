@@ -91,7 +91,6 @@ static inline void zero_copy_tx_completion(struct mbuf *m)
 static inline void tx_completion(struct mbuf *m) {
     while (m != NULL) {
         struct mbuf *next_mbuf = m->next;
-        // free the backing store
         mempool_free(&tx_buf_mempool, (void *)m->head);
 
         // free the actual mbuf struct
@@ -113,8 +112,9 @@ static inline void mbuf_fill_cqe(struct mbuf *m, struct mlx5_cqe64 *cqe) {
 
 	len = be32toh(cqe->byte_cnt);
 
-	mbuf_init(m, (unsigned char *)m + RX_BUF_HEAD, len, 0);
-	m->len = len;
+	mbuf_init(m, (unsigned char *)m, len, RX_BUF_HEAD);
+	m->len = len - RX_BUF_HEAD;
+    NETPERF_ASSERT(((char *)m->data - (char *)data) == RX_BUF_HEAD, "rx mbuf data pointer not set correctly");
 
 	m->rss_hash = mlx5_get_rss_result(cqe);
 

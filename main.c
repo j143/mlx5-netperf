@@ -212,13 +212,12 @@ int init_workload() {
         ret = initialize_client_requests(&client_requests,
                                             &rate_distribution,
                                             segment_size,
-
                                             num_segments,
                                             working_set_size);
         RETURN_ON_ERR(ret, "Failed to initialize client requests: %s", strerror(-errno));
     } else {
         // num_segments * segment_size
-        size_t server_payload_size = ( num_segments * segment_size ) - FULL_HEADER_SIZE;
+        size_t server_payload_size = ( num_segments * segment_size );
         if (client_specified) {
             ret = initialize_outgoing_header(&header,
                                                 &server_mac,
@@ -340,7 +339,7 @@ int init_mlx5() {
 
     // TODO: for a fair comparison later, initialize the tx segments at runtime
     int init_each_tx_segment = 1;
-    if (mode == UDP_SERVER && num_segments > 1) {
+    if (mode == UDP_SERVER && num_segments > 1 && zero_copy) {
         init_each_tx_segment = 0;
     }
     ret = mlx5_init_txq(&txqs[0], 
@@ -356,6 +355,7 @@ int init_mlx5() {
 }
 
 int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_len, struct eth_addr *our_eth) {
+    NETPERF_ASSERT(((char *)m->data - (char *)data) == RX_BUF_HEAD, "rx mbuf data pointer not set correctly");
     //NETPERF_DEBUG("Mbuf addr: %p, mbuf data addr: %p, diff: %lu, mbuf len: %u", mbuf, mbuf->data, (char *)(mbuf->data) - (char *)mbuf, (unsigned)(mbuf_length(mbuf)));
     unsigned char *ptr = mbuf->data;
     struct eth_hdr * const eth = (struct eth_hdr *)ptr;
@@ -377,13 +377,14 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
 
     uint16_t eth_type = ntohs(eth->type);
     if (eth_type != ETHTYPE_IP) {
-        NETPERF_DEBUG("Bad eth type: %u", (unsigned)eth_type);
+        NETPERF_DEBUG("Bad eth type: %u; returning", (unsigned)eth_type);
         return 0;
     }
 
     // check IP header
     if (ipv4->proto != IPPROTO_UDP) {
-        NETPERF_DEBUG("Bad recv type: %u", (unsigned)ipv4->proto);
+        NETPERF_DEBUG("Bad recv type: %u; returning", (unsigned)ipv4->proto);
+        return 0;
     }
     
     //NETPERF_DEBUG("Ipv4 checksum: %u, Ipv4 ttl: %u, udp checksum: %u", (unsigned)(ntohs(ipv4->chksum)), (unsigned)ipv4->ttl, (unsigned)(ntohs(udp->chksum)));
@@ -518,6 +519,7 @@ int process_server_request(struct mbuf *request,
                                 size_t payload_len, 
                                 int total_packets_required)
 {
+    NETPERF_DEBUG("Total pkts required: %d", total_packets_required);
     uint64_t segments[MAX_SCATTERS];
     struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
 
@@ -525,10 +527,11 @@ int process_server_request(struct mbuf *request,
                     "Payload length: %u not divisible by 8.", (unsigned)payload_len);
 
     // TODO: check this assertion in non-debug mode
+    NETPERF_DEBUG("Received packet with payload_len: %lu\n", payload_len);
     NETPERF_ASSERT(((payload_len - (SEGLIST_OFFSET * sizeof(uint64_t))) / 
                         sizeof(uint64_t)) == num_segments, 
                         "Request segments %u doesn't match server segments %u",
-                        (unsigned)(payload_len / sizeof(uint64_t) - 1),
+                        (unsigned)(payload_len / sizeof(uint64_t) - SEGLIST_OFFSET),
                         (unsigned)num_segments);
 
     uint64_t id = read_u64(payload, ID_OFF);
@@ -580,8 +583,10 @@ int process_server_request(struct mbuf *request,
         } else {
             // single buffer for this packet
             send_mbufs[pkt_idx][0] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
+            //NETPERF_INFO("Allocatng mbuf %p", send_mbufs[pkt_idx][0]);
             // allocate backing buffer for this mbuf
             unsigned char *buffer = (unsigned char *)mempool_alloc(&tx_buf_mempool);
+            //NETPERF_INFO("Allocating mbuf buffer %p", buffer);
             mbuf_init(send_mbufs[pkt_idx][0],
                         buffer,
                         DATA_MBUFS_SIZE,
@@ -589,16 +594,18 @@ int process_server_request(struct mbuf *request,
             // set release as non zero-copy release function
             send_mbufs[pkt_idx][0]->release = tx_completion;
             send_mbufs[pkt_idx][0]->next = NULL; // set the next packet as null
+
             for (int seg = 0; seg < nb_segs_per_packet; seg++) {
                 void *server_memory = get_server_region(server_working_set, 
                                                             segments[segment_array_idx],
-                                                            segment_size);
+                                                            actual_segment_size);
+
                 // TODO: handle case where header is NOT initialized in memory
                 NETPERF_DEBUG("Copying into offset %u of mbuf", (unsigned)(seg * segment_size));
                 mbuf_copy(send_mbufs[pkt_idx][0], 
                             (char *)server_memory,
-                            segment_size,
-                            seg * segment_size);
+                            actual_segment_size,
+                            seg * actual_segment_size);
                 segment_array_idx += 1;
 
             }
@@ -622,6 +629,10 @@ int process_server_request(struct mbuf *request,
                                         total_sent, // index to start on
                                         total_packets_required - total_sent, // tota
                                         &txqs[0]);
+        NETPERF_DEBUG("Successfully sent from %d, %d packets", total_sent, sent);
+        if (sent < (total_packets_required - total_sent)) {
+            NETPERF_INFO("Trying to send request again");
+        }
         total_sent += sent;
     }
 
@@ -638,6 +649,9 @@ int do_server() {
                                         BURST_SIZE,
                                         &rx_buf_mempool,
                                         &rxqs[0]);
+        /*if (num_received >= 1) {
+            NETPERF_INFO("Received more than 1 packet at a time: %d", num_received);
+        }*/
         if (num_received > 0) {
             for (int  i = 0; i < num_received; i++) {
                 struct mbuf *pkt = recv_mbufs[i];
@@ -655,8 +669,8 @@ int do_server() {
                                                     payload_out, 
                                                     payload_len,
                                                     total_packets_required);
-                RETURN_ON_ERR(ret, "Error processing request");
                 mbuf_free(pkt);
+                RETURN_ON_ERR(ret, "Error processing request");
             }
         }
     }

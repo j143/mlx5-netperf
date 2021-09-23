@@ -546,6 +546,7 @@ int mlx5_init_txq(struct mlx5_txq *v,
 
     // init each tx wqe
     if (init_each_tx_segment == 1) {
+        NETPERF_DEBUG("Initializing tx segments: %u", (unsigned)v->tx_qp_dv.sq.wqe_cnt);
 	for (i = 0; i < v->tx_qp_dv.sq.wqe_cnt; i++)
 		mlx5_init_tx_segment(v, mr_tx, i);
     }

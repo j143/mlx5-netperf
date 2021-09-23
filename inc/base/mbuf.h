@@ -209,7 +209,7 @@ static inline unsigned char * mbuf_offset_ptr(struct mbuf *m, size_t off) {
 
 static inline void mbuf_copy(struct mbuf *m, char *source, size_t len, size_t off) {
     NETPERF_ASSERT((m->len + len) < m->head_len, "Not enough space left in mbuf");
-    //NETPERF_DEBUG("Copying from %p into %p, withn len %u", source, (char *)m->data + off, (unsigned)len);
+    NETPERF_DEBUG("Copying from %p into %p, withn len %u", source, (char *)m->data + off, (unsigned)len);
     rte_memcpy((char *)m->data + off, source, len);
     m->len += len;
 }
@@ -219,5 +219,8 @@ static inline void mbuf_copy(struct mbuf *m, char *source, size_t len, size_t of
  */
 static inline void mbuf_free(struct mbuf *m)
 {
+    if (m->release == NULL) {
+        NETPERF_WARN("Release function is null for mbuf %p", m);
+    }
 	m->release(m);
 }

@@ -167,10 +167,10 @@ int initialize_client_requests(ClientRequest **client_requests_ptr,
             current_req->segment_offsets[i] = cur_region_idx;
             // get next pointer in chase
             cur_region_idx = get_next_ptr(indices, cur_region_idx);
-            NETPERF_DEBUG("pkt id: %u, segment: %u, region: %lu",
+            /*NETPERF_DEBUG("pkt id: %u, segment: %u, region: %lu",
                     (unsigned)iter,
                     (unsigned)i,
-                    cur_region_idx);
+                    cur_region_idx);*/
             NETPERF_ASSERT(cur_region_idx < (array_size / segment_size), "Calculated out of bounds pointer index in chase: %u", (unsigned)cur_region_idx);
         }
         // increment to the next time to send a packet

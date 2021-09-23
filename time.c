@@ -24,9 +24,26 @@ void __time_delay_us(uint64_t us)
 		cpu_relax();
 }
 
+static void rdtsc_benchmark(void) {
+
+	struct timespec t_start, t_end;
+    uint64_t ns;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t_start);
+    int calls = 1000000;
+    for (int i = 0; i < calls; i++) {
+        rdtsc();
+    }
+	clock_gettime(CLOCK_MONOTONIC_RAW, &t_end);
+	ns = ((t_end.tv_sec - t_start.tv_sec) * 1E9);
+	ns += (t_end.tv_nsec - t_start.tv_nsec);
+    float time_per_call = (float)ns / (float)calls;
+    NETPERF_INFO("%d calls to rdstc took %lu; %f per call\n", calls, ns, time_per_call);
+}
+
 /* derived from DPDK */
 static int time_calibrate_tsc(void)
 {
+    rdtsc_benchmark();
 	/* TODO: New Intel CPUs report this value in CPUID */
 	struct timespec sleeptime = {.tv_nsec = 5E8 }; /* 1/2 second */
 	struct timespec t_start, t_end;
