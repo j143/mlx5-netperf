@@ -56,7 +56,10 @@ static inline uint64_t microcycles(void)
     return rdtsc() - start_tsc;
 }
 
-
+static inline uint64_t cycletime(void)
+{
+    return rdtsc() - start_tsc;
+}
 
 /**
  * microtime - gets the number of microseconds since the process started

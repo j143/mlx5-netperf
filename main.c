@@ -441,7 +441,7 @@ int do_client() {
 
         int sent = 0;
         NETPERF_DEBUG("Attempting to transmit packet %u (send time %lu, actual time: %lu), recved %u", (unsigned)current_request->packet_id, current_request->timestamp_offset, (nanotime() - start_time_offset), (unsigned)num_received);
-        current_request->timestamp_offset = nanotime() - start_time_offset;
+        current_request->timestamp_offset = cycletime();
         while (sent != 1) {
             sent = mlx5_transmit_one(pkt, &txqs[0]);
         }
@@ -483,7 +483,7 @@ int do_client() {
                 // query the timestamp based on the ID
                 uint64_t timestamp = (get_client_req(client_requests, id))->timestamp_offset;
 
-                uint64_t rtt = nanotime() - start_time_offset - timestamp;
+                uint64_t rtt = (cycletime() - timestamp);
                 //NETPERF_INFO("Calculated %lu as rtt for pkt %lu; starting ts %u, now is %lu", rtt, id, (unsigned)timestamp, nanotime() - start_time_offset);
                 add_latency_to_map(&packet_map, rtt, id);
 

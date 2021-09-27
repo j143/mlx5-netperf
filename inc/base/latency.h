@@ -4,7 +4,7 @@
 #pragma once
 /****************************************************************/
 // CONSTANTS
-#define MAX_ITERATIONS 5000000
+#define MAX_ITERATIONS 10000000
 #define MAX_PACKETS   10
 #define MAX_SEGMENT_SIZE 8192
 

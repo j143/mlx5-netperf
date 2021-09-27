@@ -192,9 +192,10 @@ int dump_latencies(Latency_Dist_t *dist,
     if (has_latency_log == 0) {
         qsort(arr, dist->total_count, sizeof(uint64_t), cmpfunc);
         uint64_t avg_latency = (dist->latency_sum) / (dist->total_count);
-        uint64_t median = arr[(size_t)((double)dist->total_count * 0.50)];
-        uint64_t p99 = arr[(size_t)((double)dist->total_count * 0.99)];
-        uint64_t p999 = arr[(size_t)((double)dist->total_count * 0.999)];
+        NETPERF_INFO("Median index: %lu, p99 index: %lu, p999: %lu", (size_t)((float)dist->total_count * 0.50), (size_t)((float)dist->total_count * 0.99), (size_t)((float)dist->total_count * 0.999));
+        uint64_t median = arr[(size_t)((float)dist->total_count * 0.50)];
+        uint64_t p99 = arr[(size_t)((float)dist->total_count * 0.99)];
+        uint64_t p999 = arr[(size_t)((float)dist->total_count * 0.999)];
     
         NETPERF_INFO("total ct: %lu, total_time: %lu, message_size: %lu", dist->total_count, total_time, message_size);
         float achieved_rate_pps = (float)(dist->total_count) / ((float)total_time / (float)1e9);
@@ -203,6 +204,11 @@ int dump_latencies(Latency_Dist_t *dist,
         printf("Stats:\n\t- Min latency: %lu ns\n\t- Max latency: %lu ns\n\t- Avg latency: %lu ns", dist->min, dist->max, avg_latency);
         printf("\n\t- Median latency: %lu ns\n\t- p99 latency: %lu ns\n\t- p999 latency: %lu ns", median, p99, p999);
         printf("\n\t- Achieved Goodput: %0.4f Gbps ( %0.4f %% ) \n", achieved_rate, percent_rate);
+        FILE *fp = fopen("sorted.log", "w");
+        for (int i = 0; i < dist->total_count; i++) {
+            fprintf(fp, "%lu\n", arr[i]);
+        }
+        fclose(fp);
     } else {
         FILE *fp = fopen(latency_log, "w");
         for (int i = 0; i < dist->total_count; i++) {
