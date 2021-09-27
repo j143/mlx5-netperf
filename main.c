@@ -355,7 +355,7 @@ int init_mlx5() {
 }
 
 int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_len, struct eth_addr *our_eth) {
-    NETPERF_ASSERT(((char *)m->data - (char *)data) == RX_BUF_HEAD, "rx mbuf data pointer not set correctly");
+    NETPERF_ASSERT(((char *)mbuf->data - (char *)mbuf) == RX_BUF_HEAD, "rx mbuf data pointer not set correctly");
     //NETPERF_DEBUG("Mbuf addr: %p, mbuf data addr: %p, diff: %lu, mbuf len: %u", mbuf, mbuf->data, (char *)(mbuf->data) - (char *)mbuf, (unsigned)(mbuf_length(mbuf)));
     unsigned char *ptr = mbuf->data;
     struct eth_hdr * const eth = (struct eth_hdr *)ptr;
