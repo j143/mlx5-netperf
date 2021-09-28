@@ -40,7 +40,8 @@ int calculate_and_dump_latencies(Packet_Map_t *packet_map,
                                     size_t packet_size,
                                     size_t rate_pps,
                                     int has_latency_log,
-                                    char *latency_log)
+                                    char *latency_log,
+                                    int in_cycles)
 {
     int ret = 0;
     float total_time_float = (float)total_time / ((float)ONE_SECOND * 1000);
@@ -59,7 +60,8 @@ int calculate_and_dump_latencies(Packet_Map_t *packet_map,
                             packet_size, 
                             rate_gbps(rate_pps, packet_size),
                             has_latency_log,
-                            latency_log);
+                            latency_log,
+                            in_cycles);
     if (ret) {
         NETPERF_WARN("Failed to dump latencies");
         return ret;
@@ -168,12 +170,22 @@ int cmpfunc(const void * a, const void *b) {
     return (int)(*a_ptr - *b_ptr);
 }
 
+uint64_t display(uint64_t num, int in_cycles) {
+    if (in_cycles == 0) {
+        NETPERF_DEBUG("In cycles 0");
+        return num;
+    } else {
+        return cycles_to_ns(num);
+    }
+}
+
 int dump_latencies(Latency_Dist_t *dist, 
                         uint64_t total_time, 
                         size_t message_size, 
                         float rate_gbps,
                         int has_latency_log,
-                        char *latency_log) {
+                        char *latency_log,
+                        int in_cycles) {
     NETPERF_DEBUG("Trying to dump latencies on client side with message size: %u\n", (unsigned)message_size);
     // sort the latencies
     if (dist->total_count == 0) {
@@ -191,17 +203,17 @@ int dump_latencies(Latency_Dist_t *dist,
     
     if (has_latency_log == 0) {
         qsort(arr, dist->total_count, sizeof(uint64_t), cmpfunc);
-        uint64_t avg_latency = (dist->latency_sum) / (dist->total_count);
+        uint64_t avg_latency = display((dist->latency_sum) / (dist->total_count), in_cycles);
         NETPERF_INFO("Median index: %lu, p99 index: %lu, p999: %lu", (size_t)((float)dist->total_count * 0.50), (size_t)((float)dist->total_count * 0.99), (size_t)((float)dist->total_count * 0.999));
-        uint64_t median = arr[(size_t)((float)dist->total_count * 0.50)];
-        uint64_t p99 = arr[(size_t)((float)dist->total_count * 0.99)];
-        uint64_t p999 = arr[(size_t)((float)dist->total_count * 0.999)];
+        uint64_t median = display(arr[(size_t)((float)dist->total_count * 0.50)], in_cycles);
+        uint64_t p99 = display(arr[(size_t)((float)dist->total_count * 0.99)], in_cycles);
+        uint64_t p999 = display(arr[(size_t)((float)dist->total_count * 0.999)], in_cycles);
     
         NETPERF_INFO("total ct: %lu, total_time: %lu, message_size: %lu", dist->total_count, total_time, message_size);
         float achieved_rate_pps = (float)(dist->total_count) / ((float)total_time / (float)1e9);
         float achieved_rate = rate_gbps(achieved_rate_pps, message_size);
         float percent_rate = achieved_rate / rate_gbps;
-        printf("Stats:\n\t- Min latency: %lu ns\n\t- Max latency: %lu ns\n\t- Avg latency: %lu ns", dist->min, dist->max, avg_latency);
+        printf("Stats:\n\t- Min latency: %lu ns\n\t- Max latency: %lu ns\n\t- Avg latency: %lu ns", display(dist->min, in_cycles), display(dist->max, in_cycles), avg_latency);
         printf("\n\t- Median latency: %lu ns\n\t- p99 latency: %lu ns\n\t- p999 latency: %lu ns", median, p99, p999);
         printf("\n\t- Achieved Goodput: %0.4f Gbps ( %0.4f %% ) \n", achieved_rate, percent_rate);
         FILE *fp = fopen("sorted.log", "w");
@@ -212,7 +224,7 @@ int dump_latencies(Latency_Dist_t *dist,
     } else {
         FILE *fp = fopen(latency_log, "w");
         for (int i = 0; i < dist->total_count; i++) {
-            fprintf(fp, "%lu\n", dist->latencies[i]);
+            fprintf(fp, "%lu\n", display(dist->latencies[i], in_cycles));
         }
         fclose(fp);
         free(latency_log);

@@ -510,7 +510,8 @@ int do_client() {
                                     num_segments * segment_size,
                                     rate_distribution.rate_pps,
                                     has_latency_log,
-                                    latency_log);
+                                    latency_log,
+                                    1);
     return 0;
 }
 

@@ -61,6 +61,12 @@ static inline uint64_t cycletime(void)
     return rdtsc() - start_tsc;
 }
 
+static inline uint64_t cycles_to_ns(uint64_t cycles)
+{
+    float nanos = (float)cycles / (float)cycles_per_ns;
+    return (uint64_t)nanos;
+}
+
 /**
  * microtime - gets the number of microseconds since the process started
  * This routine is very inexpensive, even compared to clock_gettime().

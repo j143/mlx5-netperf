@@ -39,7 +39,8 @@ int calculate_and_dump_latencies(Packet_Map_t *packet_map,
                                     size_t packet_size,
                                     size_t rate_pps,
                                     int has_latency_log,
-                                    char *latency_log);
+                                    char *latency_log,
+                                    int in_cycles);
 
 int cmpfunc(const void *a, const void *b);
 
@@ -54,10 +55,13 @@ int calculate_latencies(Packet_Map_t *map,
 
 int add_latency(Latency_Dist_t *dist, uint64_t latency);
 
+uint64_t display(uint64_t num, int in_cycles);
+
 int dump_latencies(Latency_Dist_t *dist,
                         uint64_t total_time,
                         size_t message_size,
                         float rate_gbps,
                         int has_latency_log,
-                        char *latency_log);
+                        char *latency_log,
+                        int in_cycles);
 
