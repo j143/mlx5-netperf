@@ -70,6 +70,7 @@ int memory_registration(struct ibv_pd *pd,
                         void *buf, 
                         size_t len, 
                         int flags);
+int memory_deregistration(struct ibv_mr *mr);
 
 /* Initialize a single rxq */
 int mlx5_init_rxq(struct mlx5_rxq *v,

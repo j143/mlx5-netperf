@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <net/ethernet.h>
+#include <sys/mman.h>
 
 #include <base/debug.h>
 #include <base/mem.h>
@@ -185,6 +186,10 @@ int memory_registration(struct ibv_pd *pd,
         return -errno;
     }
     return 0;
+}
+
+int memory_deregistration(struct ibv_mr *mr) {
+    return ibv_dereg_mr(mr);
 }
 
 int mlx5_init_rxq(struct mlx5_rxq *v,

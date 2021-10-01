@@ -57,6 +57,9 @@ int add_latency(Latency_Dist_t *dist, uint64_t latency);
 
 uint64_t display(uint64_t num, int in_cycles);
 
+int dump_debug_latencies(Latency_Dist_t *dist,
+                        int in_cycles);
+
 int dump_latencies(Latency_Dist_t *dist,
                         uint64_t total_time,
                         size_t message_size,

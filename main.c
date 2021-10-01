@@ -12,6 +12,7 @@
 #include <net/ip.h>
 #include <net/udp.h>
 #include <netinet/in.h>
+#include <sys/mman.h>
 
 #include <asm/ops.h>
 #include <base/debug.h>
@@ -64,6 +65,12 @@ static ClientRequest *client_requests = NULL; // pointer to client request infor
 static OutgoingHeader header = {}; // header to copy in to the request
 static Latency_Dist_t latency_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
 static Packet_Map_t packet_map = {.total_count = 0, .grouped_rtts = NULL, .sent_ids = NULL };
+
+#ifdef __TIMERS__
+static Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+static Latency_Dist_t client_lateness_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+#endif
+
 
 static void *server_working_set;
 static struct mlx5_rxq rxqs[NUM_QUEUES];
@@ -239,6 +246,42 @@ int init_workload() {
     return 0;
 }
 
+int cleanup_mlx5() {
+    int ret = 0;
+    // mbuf mempool
+    ret = munmap(mbuf_mempool.buf, mbuf_mempool.len);
+    RETURN_ON_ERR(ret, "Failed to unmap mbuf mempool: %s", strerror(errno));
+    
+    if (mode == UDP_CLIENT) {
+        ret = memory_deregistration(tx_mr);
+        RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
+        ret = munmap(tx_buf_mempool.buf, tx_buf_mempool.len);
+        RETURN_ON_ERR(ret, "Failed to munmap tx mempool for client: %s", strerror(errno));
+
+        ret = memory_deregistration(rx_mr);
+        RETURN_ON_ERR(ret, "Failed to dereg rx_mr: %s", strerror(errno));
+        ret = munmap(rx_buf_mempool.buf, rx_buf_mempool.len);
+        RETURN_ON_ERR(ret, "Failed to munmap rx mempool for client: %s", strerror(errno));
+    } else {
+        ret = memory_deregistration(rx_mr);
+        RETURN_ON_ERR(ret, "Failed to dereg rx_mr: %s", strerror(errno));
+        ret = munmap(rx_buf_mempool.buf, rx_buf_mempool.len);
+        RETURN_ON_ERR(ret, "Failed to munmap rx mempool for server: %s", strerror(errno));
+            
+        // for both the zero-copy and non-zero-copy, un register region for tx
+        ret = memory_deregistration(tx_mr);
+        RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
+        if (!zero_copy) {
+            ret = munmap(tx_buf_mempool.buf, tx_buf_mempool.len);
+            RETURN_ON_ERR(ret, "Failed to munmap tx mempool for server: %s", strerror(errno));
+        }
+        // free the server memory
+        ret = munmap(server_working_set, align_up(working_set_size, PGSIZE_2MB));
+        RETURN_ON_ERR(ret, "Failed to unmap server working set memory");
+    }
+    return 0;
+}
+
 int init_mlx5() {
     int ret = 0;
     
@@ -356,7 +399,7 @@ int init_mlx5() {
 
 int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_len, struct eth_addr *our_eth) {
     NETPERF_ASSERT(((char *)mbuf->data - (char *)mbuf) == RX_BUF_HEAD, "rx mbuf data pointer not set correctly");
-    //NETPERF_DEBUG("Mbuf addr: %p, mbuf data addr: %p, diff: %lu, mbuf len: %u", mbuf, mbuf->data, (char *)(mbuf->data) - (char *)mbuf, (unsigned)(mbuf_length(mbuf)));
+    NETPERF_DEBUG("Mbuf addr: %p, mbuf data addr: %p, diff: %lu, mbuf len: %u", mbuf, mbuf->data, (char *)(mbuf->data) - (char *)mbuf, (unsigned)(mbuf_length(mbuf)));
     unsigned char *ptr = mbuf->data;
     struct eth_hdr * const eth = (struct eth_hdr *)ptr;
     ptr += sizeof(struct eth_hdr);
@@ -408,10 +451,13 @@ int do_client() {
 
     uint64_t total_time = rate_distribution.total_time * 1e9;
     uint64_t start_time_offset = nanotime();
+    uint64_t start_cycle_offset = ns_to_cycles(start_time_offset);
     
     // first client request (first packet sent at time 0)
     ClientRequest *current_request = get_client_req(client_requests, 0);
 
+    uint64_t last_sent_cycle = start_cycle_offset;
+    uint64_t lateness_budget = 0;
     // main processing loop
     while (nanotime() < (start_time_offset + total_time)) {
         // allocate actual mbuf struct
@@ -438,30 +484,40 @@ int do_client() {
                     (char *)current_request, 
                     client_payload_size, 
                     sizeof(OutgoingHeader));
-
         int sent = 0;
-        NETPERF_DEBUG("Attempting to transmit packet %u (send time %lu, actual time: %lu), recved %u", (unsigned)current_request->packet_id, current_request->timestamp_offset, (nanotime() - start_time_offset), (unsigned)num_received);
-        current_request->timestamp_offset = cycletime();
+#ifdef __TIMERS__
+        uint64_t actual_send_cycles = cycles_offset(start_cycle_offset);
+        add_latency(&client_lateness_dist, actual_send_cycles - (current_request->timestamp_offset + last_sent_cycle));
+#endif
+        // TODO: add a timer here, to measure, in nanoseconds, how late each
+        // transmission is, compared to the actual intersend time
+        uint64_t cur_send = cycles_offset(start_cycle_offset);
+        //lateness_budget += cur_send - (last_sent_cycle + current_request->timestamp_offset);
+        current_request->timestamp_offset = cur_send;
+        NETPERF_DEBUG("Attempting to transmit packet %u (send cycles %lu, time since last %lu), recved %u", (unsigned)current_request->packet_id, current_request->timestamp_offset, cycles_to_ns(current_request->timestamp_offset -last_sent_cycle), (unsigned)num_received);
+        last_sent_cycle = current_request->timestamp_offset;
+        
         while (sent != 1) {
             sent = mlx5_transmit_one(pkt, &txqs[0]);
         }
         
-        outstanding += total_packets_per_request;
         current_request += 1;
 
-        while (outstanding > 0) {
+        while (true) {
+            // if time to send the next packet, break
+            if (lateness_budget > current_request->timestamp_offset) {
+                lateness_budget -= current_request->timestamp_offset;
+                break;
+            }
+            if (cycles_offset(start_cycle_offset) >= (current_request->timestamp_offset - lateness_budget) + last_sent_cycle) {
+                lateness_budget = 0;
+                break;
+            }
             int nb_rx = mlx5_gather_rx((struct mbuf **)&recv_pkts, 
                                         32,
                                         &rx_buf_mempool,
                                         &rxqs[0]);
-            if (nb_rx == 0) {
-                // if time to send the next packet, break
-                if (nanotime() >= (current_request->timestamp_offset + start_time_offset)) {
-                    break;
-                }
-                continue;
-            }
-
+            
             // process any received packets
             for (int i = 0; i < nb_rx; i++) {
                 void *payload;
@@ -483,8 +539,7 @@ int do_client() {
                 // query the timestamp based on the ID
                 uint64_t timestamp = (get_client_req(client_requests, id))->timestamp_offset;
 
-                uint64_t rtt = (cycletime() - timestamp);
-                //NETPERF_INFO("Calculated %lu as rtt for pkt %lu; starting ts %u, now is %lu", rtt, id, (unsigned)timestamp, nanotime() - start_time_offset);
+                uint64_t rtt = (cycles_offset(start_cycle_offset) - timestamp);
                 add_latency_to_map(&packet_map, rtt, id);
 
                 // free back the received packet
@@ -493,9 +548,6 @@ int do_client() {
                 outstanding--;
             }
         }
-
-        // wait till time to send the next packet
-        while ((nanotime() - start_time_offset) < current_request->timestamp_offset) {}
     }
 
     // dump the packets
@@ -512,13 +564,23 @@ int do_client() {
                                     has_latency_log,
                                     latency_log,
                                     1);
+
+    cleanup_mlx5();
+
+#ifdef __TIMERS__
+    NETPERF_INFO("--------");
+    NETPERF_INFO("Client lateness dist");
+    dump_debug_latencies(&client_lateness_dist, 1);
+    NETPERF_INFO("--------");
+#endif
     return 0;
 }
 
 int process_server_request(struct mbuf *request, 
                                 void *payload, 
                                 size_t payload_len, 
-                                int total_packets_required)
+                                int total_packets_required,
+                                uint64_t recv_timestamp)
 {
     NETPERF_DEBUG("Total pkts required: %d", total_packets_required);
     uint64_t segments[MAX_SCATTERS];
@@ -536,8 +598,10 @@ int process_server_request(struct mbuf *request,
                         (unsigned)num_segments);
 
     uint64_t id = read_u64(payload, ID_OFF);
+    uint64_t timestamp = read_u64(payload, TIMESTAMP_OFF);
+
     NETPERF_DEBUG("Received packet with id %lu", id);
-    
+        
     for (size_t i = 0; i < num_segments; i++) {
         segments[i] = read_u64(payload, i + SEGLIST_OFFSET);
         NETPERF_DEBUG("Segment %u is %u", (unsigned)i, (unsigned)segments[i]);
@@ -620,6 +684,10 @@ int process_server_request(struct mbuf *request,
                                             FULL_HEADER_SIZE + sizeof(uint64_t),
                                             uint64_t *);
         *id_pointer = id;
+        uint64_t *timestamp_pointer = mbuf_offset(send_mbufs[pkt_idx][0], 
+                                            FULL_HEADER_SIZE + 0 * sizeof(uint64_t),
+                                            uint64_t *);
+        *timestamp_pointer = timestamp;
         send_mbufs[pkt_idx][0]->pkt_len = pkt_len;
     }
 
@@ -650,10 +718,8 @@ int do_server() {
                                         BURST_SIZE,
                                         &rx_buf_mempool,
                                         &rxqs[0]);
-        /*if (num_received >= 1) {
-            NETPERF_INFO("Received more than 1 packet at a time: %d", num_received);
-        }*/
         if (num_received > 0) {
+            uint64_t recv_time = nanotime();
             for (int  i = 0; i < num_received; i++) {
                 struct mbuf *pkt = recv_mbufs[i];
                 void *payload_out = NULL;
@@ -666,10 +732,18 @@ int do_server() {
                     mbuf_free(pkt);
                     continue;
                 }
+#ifdef __TIMERS__
+                uint64_t cycles_start = cycletime();
+#endif
                 int ret = process_server_request(pkt, 
                                                     payload_out, 
                                                     payload_len,
-                                                    total_packets_required);
+                                                    total_packets_required,
+                                                    recv_time);
+#ifdef __TIMERS__
+                uint64_t cycles_end = cycletime();
+                add_latency(&server_request_dist, cycles_end - cycles_start);
+#endif
                 mbuf_free(pkt);
                 RETURN_ON_ERR(ret, "Error processing request");
             }
@@ -678,9 +752,28 @@ int do_server() {
     return 0;
 }
 
+// cleanup on the server-side
+void sig_handler(int signo) {
+
+    // if debug timers were turned on, dump them
+#ifdef __TIMERS__
+    if (mode == UDP_SERVER) {
+        NETPERF_INFO("----");
+        NETPERF_INFO("server request processing timers: ");
+        dump_debug_latencies(&server_request_dist, 1);
+        NETPERF_INFO("----");
+    }
+#endif
+    cleanup_mlx5();
+    exit(0);
+    
+}
+
+
 int main(int argc, char *argv[]) {
     int ret = 0;
     seed_rand();
+
     NETPERF_DEBUG("In netperf program");
     ret = parse_args(argc, argv);
     if (ret) {
@@ -715,6 +808,9 @@ int main(int argc, char *argv[]) {
             return ret;
         }
     } else {
+        // set up signal handler
+        if (signal(SIGINT, sig_handler) == SIG_ERR)
+            printf("\ncan't catch SIGINT\n");
         return do_server();
     }
 

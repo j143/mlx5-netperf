@@ -131,10 +131,9 @@ int initialize_pointer_chasing_at_client(uint64_t **pointer_segments,
     return 0;
 }
 
-uint64_t get_next_send_time(uint64_t last_send_time, RateDistribution *rate_distribution) {
-    // right now: we only support uniform rate distribution
+uint64_t get_next_cycles_offset(RateDistribution *rate_distribution) {
     uint64_t intersend = time_intersend(rate_distribution->rate_pps);
-    return intersend + last_send_time;
+    return (uint64_t)(cycles_per_ns * (float)intersend);
 }
 
 int initialize_client_requests(ClientRequest **client_requests_ptr,
@@ -159,9 +158,8 @@ int initialize_client_requests(ClientRequest **client_requests_ptr,
 
     struct ClientRequest *current_req = (struct ClientRequest *)client_requests;
     uint64_t cur_region_idx = 0;
-    uint64_t cur_timestamp = 0;
     for (size_t iter = 0; iter < num_requests; iter++) {
-        current_req->timestamp_offset = cur_timestamp;
+        current_req->timestamp_offset = get_next_cycles_offset(rate_distribution);
         current_req->packet_id = (uint64_t)iter;
         for (size_t i = 0; i < num_segments; i++) {
             current_req->segment_offsets[i] = cur_region_idx;
@@ -173,8 +171,6 @@ int initialize_client_requests(ClientRequest **client_requests_ptr,
                     cur_region_idx);*/
             NETPERF_ASSERT(cur_region_idx < (array_size / segment_size), "Calculated out of bounds pointer index in chase: %u", (unsigned)cur_region_idx);
         }
-        // increment to the next time to send a packet
-        cur_timestamp = get_next_send_time(cur_timestamp, rate_distribution);
         current_req++;
     }
 

@@ -25,6 +25,10 @@ static inline uint64_t us_to_cycles(uint64_t a)
     return a * cycles_per_us;
 }
 
+static inline uint64_t ns_to_cycles(uint64_t a) {
+    return (uint64_t)((float)a * cycles_per_ns);
+}
+
 static inline uint64_t cycles_offset(uint64_t base)
 {
     return (rdtsc() - start_tsc) - base;

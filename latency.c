@@ -17,6 +17,8 @@
 #include <base/debug.h>
 #include <base/time.h>
 
+#define PERCENT_TO_CUT 0.00
+
 int calculate_total_packets_required(uint32_t seg_size, uint32_t nb_segs) {
     if (seg_size > MAX_SEGMENT_SIZE) {
         if (nb_segs != 1) {
@@ -172,11 +174,40 @@ int cmpfunc(const void * a, const void *b) {
 
 uint64_t display(uint64_t num, int in_cycles) {
     if (in_cycles == 0) {
-        NETPERF_DEBUG("In cycles 0");
         return num;
     } else {
         return cycles_to_ns(num);
     }
+}
+
+int dump_debug_latencies(Latency_Dist_t *dist,
+                            int in_cycles) {
+    size_t num_sorted_latencies = (size_t)((1.0 - PERCENT_TO_CUT) * (float)dist->total_count);
+    size_t cutoff = dist->total_count - num_sorted_latencies;
+    uint64_t *arr = malloc(num_sorted_latencies * sizeof(uint64_t));
+    size_t latency_sum = dist->latency_sum;
+    if (arr == NULL) {
+        NETPERF_DEBUG("Not able to allocate array to sort latencies\n");
+        exit(1);
+    }
+    for (size_t i = 0; i < dist->total_count; i++) {
+        if (i < cutoff) {
+            latency_sum -= dist->latencies[i];
+        } else {
+            arr[i - cutoff] = dist->latencies[i];
+        }
+    }
+    
+    qsort(arr, num_sorted_latencies, sizeof(uint64_t), cmpfunc);
+    uint64_t avg_latency = display((latency_sum) / (num_sorted_latencies), in_cycles);
+    NETPERF_INFO("Median index: %lu, p99 index: %lu, p999: %lu", (size_t)((float)num_sorted_latencies * 0.50), (size_t)((float)num_sorted_latencies * 0.99), (size_t)((float)num_sorted_latencies * 0.999));
+    uint64_t median = display(arr[(size_t)((float)num_sorted_latencies * 0.50)], in_cycles);
+    uint64_t p99 = display(arr[(size_t)((float)num_sorted_latencies * 0.99)], in_cycles);
+    uint64_t p999 = display(arr[(size_t)((float)num_sorted_latencies * 0.999)], in_cycles);
+    printf("Stats:\n\t- Min latency: %lu ns\n\t- Max latency: %lu ns\n\t- Avg latency: %lu ns", display(dist->min, in_cycles), display(dist->max, in_cycles), avg_latency);
+    printf("\n\t- Median latency: %lu ns\n\t- p99 latency: %lu ns\n\t- p999 latency: %lu ns\n", median, p99, p999);
+    free(arr);
+    return 0;
 }
 
 int dump_latencies(Latency_Dist_t *dist, 
@@ -192,39 +223,43 @@ int dump_latencies(Latency_Dist_t *dist,
         NETPERF_WARN("No latencies to dump");
         return -EINVAL;
     }
-    uint64_t *arr = malloc(dist->total_count * sizeof(uint64_t));
+    size_t num_sorted_latencies = (size_t)((1.0 - PERCENT_TO_CUT) * (float)dist->total_count);
+    size_t cutoff = dist->total_count - num_sorted_latencies;
+    uint64_t *arr = malloc(num_sorted_latencies * sizeof(uint64_t));
+    size_t latency_sum = dist->latency_sum;
     if (arr == NULL) {
         NETPERF_DEBUG("Not able to allocate array to sort latencies\n");
         exit(1);
     }
     for (size_t i = 0; i < dist->total_count; i++) {
-        arr[i] = dist->latencies[i];
+        if (i < cutoff) {
+            latency_sum -= dist->latencies[i];
+        } else {
+            arr[i - cutoff] = dist->latencies[i];
+        }
     }
     
-    if (has_latency_log == 0) {
-        qsort(arr, dist->total_count, sizeof(uint64_t), cmpfunc);
-        uint64_t avg_latency = display((dist->latency_sum) / (dist->total_count), in_cycles);
-        NETPERF_INFO("Median index: %lu, p99 index: %lu, p999: %lu", (size_t)((float)dist->total_count * 0.50), (size_t)((float)dist->total_count * 0.99), (size_t)((float)dist->total_count * 0.999));
-        uint64_t median = display(arr[(size_t)((float)dist->total_count * 0.50)], in_cycles);
-        uint64_t p99 = display(arr[(size_t)((float)dist->total_count * 0.99)], in_cycles);
-        uint64_t p999 = display(arr[(size_t)((float)dist->total_count * 0.999)], in_cycles);
+    qsort(arr, num_sorted_latencies, sizeof(uint64_t), cmpfunc);
+    uint64_t avg_latency = display((latency_sum) / (num_sorted_latencies), in_cycles);
+    NETPERF_INFO("Median index: %lu, p99 index: %lu, p999: %lu", (size_t)((float)num_sorted_latencies * 0.50), (size_t)((float)num_sorted_latencies * 0.99), (size_t)((float)num_sorted_latencies * 0.999));
+    uint64_t median = display(arr[(size_t)((float)num_sorted_latencies * 0.50)], in_cycles);
+    uint64_t p99 = display(arr[(size_t)((float)num_sorted_latencies * 0.99)], in_cycles);
+    uint64_t p999 = display(arr[(size_t)((float)num_sorted_latencies * 0.999)], in_cycles);
     
-        NETPERF_INFO("total ct: %lu, total_time: %lu, message_size: %lu", dist->total_count, total_time, message_size);
-        float achieved_rate_pps = (float)(dist->total_count) / ((float)total_time / (float)1e9);
-        float achieved_rate = rate_gbps(achieved_rate_pps, message_size);
-        float percent_rate = achieved_rate / rate_gbps;
-        printf("Stats:\n\t- Min latency: %lu ns\n\t- Max latency: %lu ns\n\t- Avg latency: %lu ns", display(dist->min, in_cycles), display(dist->max, in_cycles), avg_latency);
-        printf("\n\t- Median latency: %lu ns\n\t- p99 latency: %lu ns\n\t- p999 latency: %lu ns", median, p99, p999);
-        printf("\n\t- Achieved Goodput: %0.4f Gbps ( %0.4f %% ) \n", achieved_rate, percent_rate);
-        FILE *fp = fopen("sorted.log", "w");
-        for (int i = 0; i < dist->total_count; i++) {
-            fprintf(fp, "%lu\n", arr[i]);
-        }
-        fclose(fp);
-    } else {
+    NETPERF_INFO("total ct: %lu, total_time: %lu, message_size: %lu", dist->total_count, total_time, message_size);
+    float achieved_rate_pps = (float)(dist->total_count) / ((float)total_time / (float)1e9);
+    float achieved_rate = rate_gbps(achieved_rate_pps, message_size);
+    float percent_rate = achieved_rate / rate_gbps;
+    printf("Stats:\n\t- Min latency: %lu ns\n\t- Max latency: %lu ns\n\t- Avg latency: %lu ns", display(dist->min, in_cycles), display(dist->max, in_cycles), avg_latency);
+    printf("\n\t- Median latency: %lu ns\n\t- p99 latency: %lu ns\n\t- p999 latency: %lu ns", median, p99, p999);
+    printf("\n\t- Achieved Goodput: %0.4f Gbps ( %0.4f %% ) \n", achieved_rate, percent_rate);
+    
+    if (has_latency_log) {
         FILE *fp = fopen(latency_log, "w");
+        size_t ct = 0;
         for (int i = 0; i < dist->total_count; i++) {
-            fprintf(fp, "%lu\n", display(dist->latencies[i], in_cycles));
+            fprintf(fp, "%lu,%lu\n", ct, display(dist->latencies[i], in_cycles));
+            ct++;
         }
         fclose(fp);
         free(latency_log);
