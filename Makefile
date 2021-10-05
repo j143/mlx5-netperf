@@ -2,7 +2,7 @@ ROOT_PATH=.
 
 # shared toolchain definitions
 INC = -I$(ROOT_PATH)/inc
-CFLAGS  = -g -Wall -D_GNU_SOURCE $(INC) -lstdc++
+CFLAGS  = -g -Wall -D_GNU_SOURCE $(INC) -lstdc++ -O3
 EXTRA_CFLAGS = -lm
 LDFLAGS_SHARED = 
 LDFLAGS_STATIC = 

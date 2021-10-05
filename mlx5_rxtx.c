@@ -74,7 +74,7 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v)
 	struct mlx5_wqe_data_seg *dpseg;
 	void *segment;
 
-	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
+    if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
 		for (i = 0; i < compl; i++)
 			mbuf_free(mbs[i]);
@@ -82,7 +82,7 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v)
             NETPERF_WARN("txq full");
 			return 0;
 		}
-	}
+    }
 
 	segment = v->tx_qp_dv.sq.buf + (idx << v->tx_sq_log_stride);
 	ctrl = segment;
@@ -109,6 +109,17 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v)
 	mmio_wc_start();
 	mmio_write64_be(v->tx_qp_dv.bf.reg, *(__be64 *)ctrl);
 	mmio_flush_writes();
+
+    /* check for completions */
+	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
+		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
+		for (i = 0; i < compl; i++)
+			mbuf_free(mbs[i]);
+		if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
+            NETPERF_WARN("txq full");
+			return 0;
+		}
+	}
 
 	return 1;
 

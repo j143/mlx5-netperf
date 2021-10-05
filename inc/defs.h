@@ -12,7 +12,7 @@
 #define RQ_NUM_DESC			1024
 #define SQ_NUM_DESC			128
 
-#define SQ_CLEAN_THRESH			RUNTIME_RX_BATCH_SIZE
+#define SQ_CLEAN_THRESH			1
 #define SQ_CLEAN_MAX			SQ_CLEAN_THRESH
 
 struct trans_ops {
