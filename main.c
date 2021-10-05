@@ -69,6 +69,8 @@ static Packet_Map_t packet_map = {.total_count = 0, .grouped_rtts = NULL, .sent_
 #ifdef __TIMERS__
 static Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
 static Latency_Dist_t client_lateness_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+static Latency_Dist_t server_send_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+static Latency_Dist_t server_construction_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
 #endif
 
 
@@ -582,6 +584,9 @@ int process_server_request(struct mbuf *request,
                                 int total_packets_required,
                                 uint64_t recv_timestamp)
 {
+#ifdef __TIMERS__
+    uint64_t start_construct = cycletime();
+#endif
     NETPERF_DEBUG("Total pkts required: %d", total_packets_required);
     uint64_t segments[MAX_SCATTERS];
     struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
@@ -693,6 +698,11 @@ int process_server_request(struct mbuf *request,
 
     // now actually transmit the packets
     int total_sent = 0;
+#ifdef __TIMERS__
+    uint64_t end_construct = cycletime();
+    add_latency(&server_construction_dist, end_construct - start_construct);
+    uint64_t start_send = cycletime();
+#endif
     while (total_sent < total_packets_required) {
         int sent = mlx5_transmit_batch(send_mbufs, 
                                         total_sent, // index to start on
@@ -704,6 +714,10 @@ int process_server_request(struct mbuf *request,
         }
         total_sent += sent;
     }
+#ifdef __TIMERS__
+    uint64_t end_send = cycletime();
+    add_latency(&server_send_dist, end_send - start_send);
+#endif
 
     return 0;
 }
@@ -761,6 +775,13 @@ void sig_handler(int signo) {
         NETPERF_INFO("----");
         NETPERF_INFO("server request processing timers: ");
         dump_debug_latencies(&server_request_dist, 1);
+        NETPERF_INFO("----");
+        NETPERF_INFO("server send processing timers: ");
+        dump_debug_latencies(&server_send_dist, 1);
+        NETPERF_INFO("----");
+        NETPERF_INFO("----");
+        NETPERF_INFO("server pkt construct processing timers: ");
+        dump_debug_latencies(&server_construction_dist, 1);
         NETPERF_INFO("----");
     }
 #endif
