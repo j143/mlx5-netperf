@@ -56,7 +56,7 @@ static uint32_t client_port = 54321;
 static size_t num_segments = 1;
 static size_t segment_size = 1024;
 static size_t working_set_size = 16384;
-static int zero_copy = 0;
+static int zero_copy = 1;
 static int client_specified = 0;
 static int has_latency_log = 0;
 static char *latency_log;
@@ -109,7 +109,7 @@ static int parse_args(int argc, char *argv[]) {
         {"time", optional_argument, 0, 't'},
         {"array_size", optional_argument, 0, 'a'},
         {"latency_log", optional_argument, 0, 'l'},
-        {"zero_copy", no_argument, 0, 'z'},
+        {"with_copy", no_argument, 0, 'z'},
         {0,           0,                 0,  0   }
     };
     int long_index = 0;
@@ -173,8 +173,8 @@ static int parse_args(int argc, char *argv[]) {
                 str_to_long(optarg, &tmp);
                 working_set_size = tmp;
                 break;
-            case 'z': // zero_copy
-                zero_copy = 1;
+            case 'z': // with_copy
+                zero_copy = 0;
                 break;
             case 'r': // rate
                 str_to_long(optarg, &tmp);
