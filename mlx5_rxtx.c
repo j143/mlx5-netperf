@@ -58,14 +58,16 @@ int mlx5_gather_completions(struct mbuf **mbufs,
 
 		PANIC_ON_TRUE(opcode != MLX5_CQE_REQ, "wrong opcode");
 
-		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "wrong cqe format");
+		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "cq->cqe_cntwrong cqe format");
 
 		wqe_idx = be16toh(cqe->wqe_counter) & (v->tx_qp_dv.sq.wqe_cnt - 1);
-        NETPERF_DEBUG("Completion on wqe idx: %u; cqe_counter: %u", wqe_idx, be16toh(cqe->wqe_counter));
+        NETPERF_DEBUG("Completion on wqe idx: %u; unwrapped cqe wqe idx: %u, wqe ct: %u, cqe cnt: %u", wqe_idx, be16toh(cqe->wqe_counter), v->tx_qp_dv.sq.wqe_cnt, cq->cqe_cnt);
 		mbufs[compl_cnt] = load_acquire(&v->buffers[wqe_idx]);
+        v->true_cq_head += mbufs[compl_cnt]->num_wqes;
         // pad by actual number of wqes taken by this send
 	}
 
+    NETPERF_DEBUG("after processing completions, cq_head is : %u, sq_head is: %u, true cq head: %u", v->cq_head, v->sq_head, v->true_cq_head);
 	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
 
 	return compl_cnt;
@@ -112,8 +114,8 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
 		for (i = 0; i < compl; i++)
 			mbuf_free(mbs[i]);
 		if (unlikely((v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v)) < num_wqes)) {
-            NETPERF_WARN("txq full");
-			return 0;
+            NETPERF_WARN("txq full: inflight %u, ct %u, sq: %u, cq: %u", nr_inflight_tx(v), v->tx_qp_dv.sq.wqe_cnt, v->sq_head, v->cq_head);
+			return ENOMEM;
 		}
     }
 
@@ -148,7 +150,6 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     struct eth_hdr *eth = current_segment_ptr;
     struct ip_hdr *ipv4 = current_segment_ptr + sizeof(struct eth_hdr);
     struct udp_hdr *udp = current_segment_ptr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr);
-    uint64_t *id_ptr = current_segment_ptr + 42;
 
     // TODO: does inline data need to be contiguous?
     // TODO: what if we want to inline more DPDK data?
@@ -179,7 +180,6 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     }
 
     print_individual_headers(eth, ipv4, udp);
-    NETPERF_DEBUG("Packet id we are transmitting: %lu", *id_ptr);
 
     struct mbuf *curr = m;
     m->num_wqes = num_wqes;
@@ -218,7 +218,7 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
 
     int ret = mlx5_fill_tx_segment(v, m, request_header, inline_len);
     if (ret == ENOMEM) {
-        NETPERF_WARN("txq full");
+        NETPERF_WARN("could not construct segment: txq full");
         return 0;
     }
     RETURN_ON_ERR(ret, "Could not fill tx segment");

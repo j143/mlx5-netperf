@@ -601,9 +601,6 @@ int process_server_request(struct mbuf *request,
     struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
     
     NETPERF_DEBUG("Received packet with payload_len: %lu\n", payload_len);
-    uint64_t id = read_u64(payload, ID_OFF);
-
-    NETPERF_DEBUG("Received packet with id %lu", id);
         
     for (size_t i = 0; i < num_segments; i++) {
         segments[i] = read_u64(payload, i + SEGLIST_OFFSET);

@@ -57,6 +57,7 @@ struct mlx5_txq {
 	/* direct verbs cq */
 	struct mlx5dv_cq tx_cq_dv;
 	uint32_t cq_head;
+    uint32_t true_cq_head;
 	uint32_t tx_cq_log_stride;
 
 	struct ibv_cq_ex *tx_cq;
@@ -65,7 +66,7 @@ struct mlx5_txq {
 
 static inline unsigned int nr_inflight_tx(struct mlx5_txq *v)
 {
-	return v->sq_head - v->cq_head;
+	return v->sq_head - v->true_cq_head;
 }
 
 /*
