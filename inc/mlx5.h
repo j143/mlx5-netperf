@@ -4,6 +4,8 @@
 #include <infiniband/verbs.h>
 #include <base/byteorder.h>
 
+#define POW2MOD(num, size) ((num & (size - 1)))
+#define get_segment(v, idx) ((v->tx_qp_dv.sq.buf + (idx << v->tx_sq_log_stride)))
 
 /*
  * Direct hardware queue support

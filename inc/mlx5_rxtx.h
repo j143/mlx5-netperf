@@ -39,6 +39,29 @@ extern struct mempool tx_buf_mempool;
 extern struct mempool mbuf_mempool;
 extern uint32_t total_dropped;
 
+/* 
+ * Check for completions
+ * */
+
+
+/* 
+ * mlx5_fill_tx_segment - constructs dynamically sized work request based on
+ * the number of scatter-gather elements and the amount of data to inline.
+ *
+ * @mlx5_txq: the particular tx q to send the work request on.
+ * @mbuf: the head of the mbuf linked list.
+ * @request_header: if this is not null, will inline this.
+ * @inline_len: if this is 0, do not inline anything. otherwise, should be >=
+ * sizeof(*request_header).
+ *
+ * Returns: 0 on success, ENOMEM if no descriptors available, errno otherwise.
+ * */
+int mlx5_fill_tx_segment(struct mlx5_txq *v,
+                            struct mbuf *m,
+                            RequestHeader *request_header,
+                            size_t inline_len);
+                            
+
 /*
  * mlx5_gather_completions - collect up to budget received packets and completions
  */
@@ -51,9 +74,15 @@ int mlx5_gather_completions(struct mbuf **mbufs,
  * mlx5_transmit_one - send one mbuf
  * @m: mbuf to send - can potentially be a scattered list of mbufs
  * @v: tx queue
+ * @request_header: RequestHeader object containing packet header that should be
+ * inlined (will be copied into the inline portion of the work request).
  * returns 1 on sent, 0 on error.
+ * @inline_len: Amount of data to inline in the request it self. If 0, does not
+ * inline request header. If greater than the length of the request header,
+ * inlines request header and additional data from the mbuf itself. Must be less
+ * than the max_inline_len when ring buffer was constructed.
  */
-int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v);
+int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header, size_t inline_len);
 
 /*
  * mlx5_transmit_batch - send a batch of mbuf,
@@ -61,13 +90,19 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v);
  * @start_index: which index to start sending from (must be <= burst_size)
  * @burst_size: number of mbufs to send
  * @v: tx queue
+ * @request_headers: Array of request headers corresponding to each mbuf in the
+ * mbuf array.
+ * @inline_len: Array of amount of data to inline, corresponding to each mbuf in
+ * the mbuf array.
  *
  * Returns number of successfully transmitted mbufs on success.
  */
 int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
                         size_t start_index,
                         size_t burst_size,
-                        struct mlx5_txq *v);
+                        struct mlx5_txq *v,
+                        RequestHeader *request_headers[MAX_PACKETS],
+                        size_t inline_len[MAX_PACKETS]);
 
 /* 
  * Gather received packets

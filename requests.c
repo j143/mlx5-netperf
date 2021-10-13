@@ -24,6 +24,48 @@
 #include <base/time.h>
 #include <asm/ops.h>
 
+/* Given a received ethernet header, ipv4 header, udp header and request
+ * metadata, write into outgoing header*/
+int initialize_reverse_request_header(RequestHeader *request_header,
+                                        struct eth_hdr *eth,
+                                        struct ip_hdr *ipv4,
+                                        struct udp_hdr *udp,
+                                        size_t payload_size,
+                                        uint64_t packet_id) {
+    NETPERF_DEBUG("Received header");
+    struct eth_hdr *outgoing_eth = &request_header->packet_header.eth;
+    struct ip_hdr *outgoing_ipv4 = &request_header->packet_header.ipv4;
+    struct udp_hdr *outgoing_udp = &request_header->packet_header.udp;
+    
+    /* Reverse ethernet header */
+    ether_addr_copy(&eth->dhost, &outgoing_eth->shost);
+    ether_addr_copy(&eth->shost, &outgoing_eth->dhost);
+    outgoing_eth->type = htons(ETHTYPE_IP);
+
+    /* Reverse ipv4 header */
+    outgoing_ipv4->tos = 0x0;
+    outgoing_ipv4->len = htons(sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + payload_size);
+    outgoing_ipv4->id = htons(1);
+    outgoing_ipv4->off = 0;
+    outgoing_ipv4->ttl = 64;
+    outgoing_ipv4->proto = IPPROTO_UDP;
+    // TODO: write checksum manually?
+    outgoing_ipv4->chksum = 0;
+    outgoing_ipv4->saddr = ipv4->daddr;
+    outgoing_ipv4->daddr = ipv4->saddr;
+    
+    /* Reverse udp header */
+    outgoing_udp->src_port = udp->dst_port;
+    outgoing_udp->dst_port = udp->src_port;
+    outgoing_udp->len = htons(sizeof(struct udp_hdr) + payload_size);
+    outgoing_udp->chksum = get_chksum(udp);
+
+
+    /* Insert back packet id */
+    request_header->packet_id = packet_id;
+    return 0;
+}
+                                
 int initialize_outgoing_header(OutgoingHeader *header,
                                 struct eth_addr *src_addr,
                                 struct eth_addr *dst_addr,
@@ -57,7 +99,7 @@ int initialize_outgoing_header(OutgoingHeader *header,
     // fill in the udp header
     udp->src_port = htons(src_port);
     udp->dst_port = htons(dst_port);
-    udp->len = htons(sizeof(struct udp_hdr));
+    udp->len = htons(sizeof(struct udp_hdr) + payload_size);
     udp->chksum = get_chksum(udp);
     
     return 0;
@@ -66,18 +108,20 @@ int initialize_outgoing_header(OutgoingHeader *header,
 
 int initialize_server_memory(void *memory,
                                 size_t segment_size,
-                                size_t array_size,
-                                OutgoingHeader *header)
+                                size_t array_size)
 {
     // for every segment_size across the memory, write in the packet header
     if (array_size % segment_size != 0) {
         NETPERF_WARN("Segment size %u not aligned to array size %u", (unsigned)segment_size, (unsigned)array_size);
         return -EINVAL;
     }
+    const char* alphabet = "abcdefghijklmnopqrstuvwxyz";
 
+    int current_index = 0;
     for (size_t i = 0; i < array_size / segment_size; i++) {
         char *cur_pointer = get_server_region(memory, i, segment_size);
-        rte_memcpy(cur_pointer, (char *)header, sizeof(OutgoingHeader));
+        memset(cur_pointer, alphabet[current_index], segment_size);
+        current_index = (current_index + 1) % 26;
     }
 
     return 0;

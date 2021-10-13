@@ -84,8 +84,7 @@ int mlx5_qs_init_flows(struct mlx5_rxq *v,
                         struct ibv_pd *ibv_pd,
                         struct ibv_context *ibv_context,
                         struct eth_addr *my_eth, 
-                        struct eth_addr *other_eth, 
-                        int hardcode_sender);
+                        struct eth_addr *other_eth);
 
 /* Initialize txq */
 int mlx5_init_txq(struct mlx5_txq *v, 
@@ -94,8 +93,3 @@ int mlx5_init_txq(struct mlx5_txq *v,
                     struct ibv_mr *mr_tx,
                     size_t max_inline_data,
                     int init_each_tx_segment);
-
-/* Initialize each segment in the wqe assuming a single scatter-gather element */
-void mlx5_init_tx_segment(struct mlx5_txq *v, 
-                            struct ibv_mr *mr_tx, 
-                            unsigned int idx);

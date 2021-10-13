@@ -15,8 +15,7 @@
 // CONSTANTS
 #define REQUEST_PADDING 1.20
 #define MAX_SCATTERS    32
-#define TIMESTAMP_OFF   0
-#define ID_OFF          1
+#define ID_OFF          0
 #define SEGLIST_OFFSET     (ID_OFF + 1)
 
 // MACROS
@@ -44,7 +43,7 @@ typedef struct RateDistribution {
 
 typedef struct ClientRequest
 {
-    uint64_t timestamp_offset;
+    uint64_t timestamp_offset; // not sent inside the packet
     uint64_t packet_id;
     uint64_t segment_offsets[32]; // maximum number of segments we'd be asking for (within array_size)
 } __attribute__((packed)) ClientRequest;
@@ -55,6 +54,74 @@ typedef struct OutgoingHeader
     struct ip_hdr ipv4;
     struct udp_hdr udp;
 } __attribute__((packed)) OutgoingHeader;
+
+typedef struct RequestHeader {
+    struct OutgoingHeader packet_header;
+    uint64_t packet_id;
+} __attribute__((packed)) RequestHeader;
+
+inline void print_individual_headers(struct eth_hdr *eth, struct ip_hdr *ipv4, struct udp_hdr *udp) {
+    NETPERF_DEBUG("Src eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,
+               eth->shost.addr[0], 
+               eth->shost.addr[1], 
+               eth->shost.addr[2],
+               eth->shost.addr[3],
+               eth->shost.addr[4],
+               eth->shost.addr[5]);
+    NETPERF_DEBUG("Dst eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,
+                eth->dhost.addr[0], 
+                eth->dhost.addr[1], 
+                eth->dhost.addr[2],
+                eth->dhost.addr[3],
+                eth->dhost.addr[4],
+                eth->dhost.addr[5]);
+    NETPERF_DEBUG("Src ip: %u, dst ip: %u, src port: %u, dst port: %u",
+                    ntohs(ipv4->saddr),
+                    ntohs(ipv4->daddr),
+                    ntohs(udp->src_port),
+                    ntohs(udp->dst_port));
+
+}
+
+inline void print_outgoing_header(OutgoingHeader *packet_header) {
+    NETPERF_DEBUG("Src eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,
+               packet_header->eth.shost.addr[0], 
+               packet_header->eth.shost.addr[1], 
+               packet_header->eth.shost.addr[2],
+               packet_header->eth.shost.addr[3],
+               packet_header->eth.shost.addr[4],
+               packet_header->eth.shost.addr[5]);
+    NETPERF_DEBUG("Dst eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,
+               packet_header->eth.dhost.addr[0], 
+               packet_header->eth.dhost.addr[1], 
+               packet_header->eth.dhost.addr[2],
+               packet_header->eth.dhost.addr[3],
+               packet_header->eth.dhost.addr[4],
+               packet_header->eth.dhost.addr[5]);
+    NETPERF_DEBUG("Src ip: %u, dst ip: %u, src port: %u, dst port: %u",
+                    ntohs(packet_header->ipv4.saddr),
+                    ntohs(packet_header->ipv4.daddr),
+                    ntohs(packet_header->udp.src_port),
+                    ntohs(packet_header->udp.dst_port));
+}
+
+inline void print_request_header(RequestHeader *header) {
+    print_outgoing_header(&header->packet_header);
+    NETPERF_DEBUG("request_id: %lu", header->packet_id);
+}
+
+
+/* Initialize outgoing header based on incoming packet */
+int initialize_reverse_request_header(RequestHeader *header,
+                                        struct eth_hdr *eth,
+                                        struct ip_hdr *ipv4,
+                                        struct udp_hdr *udp,
+                                        size_t payload_size,
+                                        uint64_t packet_id);
 
 /* Initialize these headers with the given data. */
 int initialize_outgoing_header(OutgoingHeader *header,
@@ -73,8 +140,7 @@ uint64_t get_next_cycles_offset(RateDistribution *rate_distribution);
  * headers. */
 int initialize_server_memory(void *memory,
                                     size_t segment_size,
-                                    size_t array_size,
-                                    struct OutgoingHeader *header);
+                                    size_t array_size);
 
 /* Initialize the client requests (with fake pointer chasing).
  * Return number of requests set on success, errno set on error. */

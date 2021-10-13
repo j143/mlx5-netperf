@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <errno.h>
 #include <unistd.h>
+#include <net/ip.h>
+#include <net/udp.h>
+#include <net/ethernet.h>
 
 #include <asm/ops.h>
 #include <base/debug.h>
@@ -36,6 +39,9 @@ int mlx5_gather_completions(struct mbuf **mbufs,
                             struct mlx5_txq *v, 
                             unsigned int budget)
 {
+    // question to figure out: if a particular send takes more than one wqe
+    // (let's say it takes two wqes) ==> is there "one" completion notification
+    // per mbuf or 2?
 	struct mlx5dv_cq *cq = &v->tx_cq_dv;
 	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
 
@@ -55,7 +61,9 @@ int mlx5_gather_completions(struct mbuf **mbufs,
 		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "wrong cqe format");
 
 		wqe_idx = be16toh(cqe->wqe_counter) & (v->tx_qp_dv.sq.wqe_cnt - 1);
+        NETPERF_DEBUG("Completion on wqe idx: %u; cqe_counter: %u", wqe_idx, be16toh(cqe->wqe_counter));
 		mbufs[compl_cnt] = load_acquire(&v->buffers[wqe_idx]);
+        // pad by actual number of wqes taken by this send
 	}
 
 	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
@@ -64,45 +72,161 @@ int mlx5_gather_completions(struct mbuf **mbufs,
 }
 
 
-int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v)
-{
-	int i, compl = 0;
-	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
+int mlx5_fill_tx_segment(struct mlx5_txq *v,
+                            struct mbuf *m,
+                            RequestHeader *request_header,
+                            size_t inline_len) {
+    
+    int i, compl = 0;
 	struct mbuf *mbs[SQ_CLEAN_MAX];
 	struct mlx5_wqe_ctrl_seg *ctrl;
 	struct mlx5_wqe_eth_seg *eseg;
 	struct mlx5_wqe_data_seg *dpseg;
-	void *segment;
+    void *current_segment_ptr;
+    void *end_ptr = v->tx_qp_dv.sq.buf + v->tx_qp_dv.sq.wqe_cnt * v->tx_qp_dv.sq.stride;
+    
+    // for now: we only allow inlining the entire request header, or nothing
+    //NETPERF_ASSERT((inline_len == sizeof(RequestHeader) && request_header != NULL) || (request_header == NULL && inline_len == 0), "Provided inline_len not large enough: %lu, expected >= %lu", inline_len, sizeof(RequestHeader));
 
-    if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
+    // calculate the number of 16 byte segments required for the work request
+    // (qpn_ds)
+    // 1 for control segment
+    // 1 for ethernet segment until inline header
+    // (inline_len + 15) / 16 pads inline_len to the next multiple of 16 before
+    // dividing
+    // inline data starts two bytes before `eth_seg->inline_hdr` (at
+    // inline_hdr_start)
+    NETPERF_DEBUG("Ctrl size: %lu, eth size: %lu, inline size: %lu, num mbufs: %d", sizeof(*ctrl), offsetof(struct mlx5_wqe_eth_seg, inline_hdr), inline_len, m->nb_segs);
+    int num_hdr_segs  = sizeof(*ctrl) / 16 +
+                        (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
+                        ((inline_len - 2) + 15) / 16;
+    int num_dpsegs = (sizeof(*dpseg) * m->nb_segs) / 16;
+    // number of work requests must be padded to 4 16-byte segments
+    int num_wqes = (num_hdr_segs + num_dpsegs + 3) / 4;
+
+    NETPERF_DEBUG("Num octowords for req: %d, num wqes: %d", num_hdr_segs + num_dpsegs, num_wqes);
+
+    // check if there are enough wqes: if not: check for completions
+    if (unlikely((v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v)) < num_wqes)) {
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
 		for (i = 0; i < compl; i++)
 			mbuf_free(mbs[i]);
-		if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
+		if (unlikely((v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v)) < num_wqes)) {
             NETPERF_WARN("txq full");
 			return 0;
 		}
     }
 
-	segment = v->tx_qp_dv.sq.buf + (idx << v->tx_sq_log_stride);
-	ctrl = segment;
-	eseg = segment + sizeof(*ctrl);
-	dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
-
+    // calculate number of contiguous wqes (before the end of the ringe buffer)
+    uint32_t current_idx = POW2MOD(v->sq_head, v->tx_qp_dv.sq.wqe_cnt - 1);
+    NETPERF_DEBUG("Current post number: %u, wrapped: %u", v->sq_head, current_idx);
+    current_segment_ptr  = get_segment(v, current_idx);
+    NETPERF_DEBUG("Ctrl seg addr: %p", current_segment_ptr);
+    
+    // fill in the control segment
+    ctrl = current_segment_ptr;
+    *(uint32_t *)(current_segment_ptr + 8) = 0;
+    ctrl->imm = 0;
+    ctrl->fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
+    ctrl->qpn_ds = htobe32((num_hdr_segs + num_dpsegs) | (v->tx_qp->qp_num << 8) );
 	ctrl->opmod_idx_opcode = htobe32(((v->sq_head & 0xffff) << 8) |
 					       MLX5_OPCODE_SEND);
+    current_segment_ptr += sizeof(*ctrl);
 
 
-    NETPERF_DEBUG("Transmitting mbuf with length %u, data_ptr %p", mbuf_length(m), mbuf_data(m));
-	dpseg->byte_count = htobe32(mbuf_length(m));
-	dpseg->addr = htobe64((uint64_t)mbuf_data(m));
+    // fill in the ethernet segment
+    NETPERF_DEBUG("Eseg addr: %p", current_segment_ptr);
+    eseg = current_segment_ptr;
+    memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
+    eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
+    eseg->inline_hdr_sz = htobe16(inline_len);
+    eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
+    current_segment_ptr += offsetof(struct mlx5_wqe_eth_seg, inline_hdr_start);
+    NETPERF_DEBUG("Inline addr: %p", current_segment_ptr);
 
-	/* record buffer */
-	store_release(&v->buffers[v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1)], m);
-	v->sq_head++;
+    // after doing the mempcy, check the ethernet headers are put in alright
+    struct eth_hdr *eth = current_segment_ptr;
+    struct ip_hdr *ipv4 = current_segment_ptr + sizeof(struct eth_hdr);
+    struct udp_hdr *udp = current_segment_ptr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr);
+    uint64_t *id_ptr = current_segment_ptr + 42;
+
+    // TODO: does inline data need to be contiguous?
+    // TODO: what if we want to inline more DPDK data?
+    // Two cases:
+    // 1: the inline data needs to be wrapped around to the front of the ring
+    // buffer
+    // 2: the inline data can fit before the buffer wraps around
+    if ((end_ptr - current_segment_ptr) < inline_len) {
+        // copy first chunk
+        size_t first_chunk_size = end_ptr - current_segment_ptr;
+        void *inline_ptr = request_header;
+        rte_memcpy(current_segment_ptr, inline_ptr, first_chunk_size);
+
+        // wrap
+        current_segment_ptr = v->tx_qp_dv.sq.buf;
+        inline_ptr += first_chunk_size;
+
+        // 2nd chunk
+        rte_memcpy(current_segment_ptr, inline_ptr, inline_len - first_chunk_size);
+        // pad to next 16 byte aligned ptr
+        current_segment_ptr += (inline_len - first_chunk_size + 15) & ~0xf;
+    } else {
+        rte_memcpy(current_segment_ptr, request_header, inline_len);
+        // pad to next 16 byte aligned ptr
+        current_segment_ptr += 2;
+        current_segment_ptr += (inline_len - 2 + 15) & ~0xf;
+        NETPERF_DEBUG("Dpseg addr: %p", current_segment_ptr);
+    }
+
+    print_individual_headers(eth, ipv4, udp);
+    NETPERF_DEBUG("Packet id we are transmitting: %lu", *id_ptr);
+
+    struct mbuf *curr = m;
+    m->num_wqes = num_wqes;
+    while (curr != NULL) {
+        dpseg = current_segment_ptr;
+        // lkey already set during initialization
+        NETPERF_DEBUG("Transmitting mbuf with length %u, data_ptr %p", mbuf_length(m), mbuf_data(m));
+	    dpseg->byte_count = htobe32(mbuf_length(m));
+	    dpseg->addr = htobe64((uint64_t)mbuf_data(m));
+
+        // go to next segment ptr and roll over
+        current_segment_ptr += sizeof(*dpseg);
+        if (dpseg == end_ptr) {
+            current_segment_ptr = v->tx_qp_dv.sq.buf;
+        }
+        dpseg->lkey = htobe32(curr->lkey);
+        curr = curr->next;
+    }
+
+    /* record buffer for completion queue */
+    // TODO: this corresponds to the sq_head, which means there's potentially
+    // some gaps
+    // This is probably ok
+    store_release(&v->buffers[v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1)], m);
+    v->sq_head += num_wqes;
+    NETPERF_DEBUG("Incrementing sq_head to %u", v->sq_head);
+
+    return 0; 
+}
+int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header, size_t inline_len)
+{
+	int i, compl = 0;
+	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
+	struct mbuf *mbs[SQ_CLEAN_MAX];
+	struct mlx5_wqe_ctrl_seg *ctrl =  get_segment(v, idx);
+
+    int ret = mlx5_fill_tx_segment(v, m, request_header, inline_len);
+    if (ret == ENOMEM) {
+        NETPERF_WARN("txq full");
+        return 0;
+    }
+    RETURN_ON_ERR(ret, "Could not fill tx segment");
+    NETPERF_DEBUG("Size of bf reg: %u", v->tx_qp_dv.bf.size);
 
 	/* write doorbell record */
 	udma_to_device_barrier();
+    // post the next new wqe to doorbell
 	v->tx_qp_dv.dbrec[MLX5_SND_DBR] = htobe32(v->sq_head & 0xffff);
 
 	/* ring bf doorbell */
@@ -174,12 +298,14 @@ int mlx5_gather_rx(struct mbuf **ms,
 int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
                         size_t start_index,
                         size_t burst_size,
-                        struct mlx5_txq *v)
+                        struct mlx5_txq *v,
+                        RequestHeader *request_headers[MAX_PACKETS],
+                        size_t inline_len[MAX_PACKETS])
 {
     int total_sent = 0;
     for (size_t i = start_index; i < burst_size; i++) {
         struct mbuf *mbuf = mbufs[i][0];
-        if (mlx5_transmit_one(mbuf, v) == 0) {
+        if (mlx5_transmit_one(mbuf, v, request_headers[i], inline_len[i]) == 0) {
             return total_sent;
         }
         total_sent += 1;

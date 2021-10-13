@@ -57,7 +57,6 @@ static size_t num_segments = 1;
 static size_t segment_size = 1024;
 static size_t working_set_size = 16384;
 static int zero_copy = 1;
-static int client_specified = 0;
 static int has_latency_log = 0;
 static char *latency_log;
 static RateDistribution rate_distribution = {.type = UNIFORM, .rate_pps = 5000, .total_time = 2};
@@ -65,6 +64,8 @@ static ClientRequest *client_requests = NULL; // pointer to client request infor
 static OutgoingHeader header = {}; // header to copy in to the request
 static Latency_Dist_t latency_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
 static Packet_Map_t packet_map = {.total_count = 0, .grouped_rtts = NULL, .sent_ids = NULL };
+static RequestHeader *request_headers[MAX_PACKETS];
+static size_t inline_lengths[MAX_PACKETS];
 
 #ifdef __TIMERS__
 static Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
@@ -139,7 +140,6 @@ static int parse_args(int argc, char *argv[]) {
                    NETPERF_ERROR("failed to convert %s to a mac address", optarg);
                    return -EINVAL;
                 }
-                client_specified = 1;
                 NETPERF_INFO("Parsed client eth addr: %s", optarg);
                 break;
             case 'e':
@@ -200,8 +200,7 @@ static int parse_args(int argc, char *argv[]) {
 /**
  * Initializes data for the actual workload.
  * On the client side: initializes the client requests and the outgoing header.
- * On the server side: if there is a single client, initializes the server
- * memory region.
+ * On the server side: fills in payload on the server side.
  */
 int init_workload() {
     int ret = 0;
@@ -226,23 +225,15 @@ int init_workload() {
         RETURN_ON_ERR(ret, "Failed to initialize client requests: %s", strerror(-errno));
     } else {
         // num_segments * segment_size
-        size_t server_payload_size = ( num_segments * segment_size );
-        if (client_specified) {
-            ret = initialize_outgoing_header(&header,
-                                                &server_mac,
-                                                &client_mac,
-                                                server_ip,
-                                                client_ip,
-                                                server_port,
-                                                client_port,
-                                                server_payload_size);
-            RETURN_ON_ERR(ret, "Failed to initialize server header");
-            ret = initialize_server_memory(server_working_set,
-                                            segment_size,
-                                            working_set_size,
-                                            &header);
-            RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
+        ret = initialize_server_memory(server_working_set,
+                                        segment_size,
+                                        working_set_size);
+        RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
+        // TODO: for now, initialize inline size to be size of request header
+        for (size_t i = 0; i < MAX_PACKETS; i++) {
+            inline_lengths[i] = sizeof(RequestHeader);
         }
+
     }
 
     return 0;
@@ -373,13 +364,12 @@ int init_mlx5() {
 
     struct eth_addr *my_eth = &server_mac;
     struct eth_addr *other_eth = &client_mac;
-    int hardcode_sender = client_specified;
     if (mode == UDP_CLIENT) {
         my_eth = &client_mac;
         other_eth = &server_mac;
     }
 
-    ret = mlx5_qs_init_flows(&rxqs[0], pd, context, my_eth, other_eth, hardcode_sender);
+    ret = mlx5_qs_init_flows(&rxqs[0], pd, context, my_eth, other_eth);
     RETURN_ON_ERR(ret, "Failed to install queue steering rules");
 
     // TODO: for a fair comparison later, initialize the tx segments at runtime
@@ -397,6 +387,23 @@ int init_mlx5() {
 
     NETPERF_INFO("Finished creating txq and rxq");
     return ret;
+}
+
+int parse_outgoing_request_header(RequestHeader *request_header, struct mbuf *mbuf, size_t payload_size) {
+    unsigned char *ptr = mbuf->data;
+    struct eth_hdr * const eth = (struct eth_hdr *)ptr;
+    ptr += sizeof(struct eth_hdr);
+    struct ip_hdr * const ipv4 = (struct ip_hdr *)ptr;
+    ptr += sizeof(struct ip_hdr);
+    struct udp_hdr *const udp = (struct udp_hdr *)ptr;
+    ptr += sizeof(struct udp_hdr);
+    uint64_t packet_id = *(uint64_t *)ptr;
+    return initialize_reverse_request_header(request_header,
+                                                eth,
+                                                ipv4,
+                                                udp,
+                                                payload_size,
+                                                packet_id);
 }
 
 int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_len, struct eth_addr *our_eth) {
@@ -450,6 +457,7 @@ int do_client() {
     
     size_t num_received = 0;
     size_t outstanding = 0;
+    RequestHeader request_header;
 
     uint64_t total_time = rate_distribution.total_time * 1e9;
     uint64_t start_time_offset = nanotime();
@@ -476,6 +484,7 @@ int do_client() {
         // frees the backing store back to tx_buf_mempool and the actual struct
         // back to the mbuf_mempool
         pkt->release = tx_completion;
+        pkt->lkey = tx_mr->lkey;
 
         // copy data into the mbuf
         mbuf_copy(pkt, 
@@ -483,7 +492,7 @@ int do_client() {
                     sizeof(OutgoingHeader), 
                     0);
         mbuf_copy(pkt, 
-                    (char *)current_request, 
+                    (char *)current_request + sizeof(uint64_t), 
                     client_payload_size, 
                     sizeof(OutgoingHeader));
         int sent = 0;
@@ -500,7 +509,7 @@ int do_client() {
         last_sent_cycle = current_request->timestamp_offset;
         
         while (sent != 1) {
-            sent = mlx5_transmit_one(pkt, &txqs[0]);
+            sent = mlx5_transmit_one(pkt, &txqs[0], &request_header, 0);
         }
         
         current_request += 1;
@@ -529,13 +538,13 @@ int do_client() {
                     mbuf_free(recv_pkts[i]);
                     continue;
                 }
-                NETPERF_ASSERT((payload_len + FULL_HEADER_SIZE) == 
+                NETPERF_ASSERT((payload_len) == 
                                     num_segments * segment_size, 
                                     "Expected size: %u; actual size: %u", 
                                     (unsigned)(num_segments * segment_size),
-                                    (unsigned)(payload_len + FULL_HEADER_SIZE));
+                                    (unsigned)(payload_len));
 
-                // read the timestamp
+                // read the id recorded in this packet
                 uint64_t id = read_u64(payload, ID_OFF);
 
                 // query the timestamp based on the ID
@@ -590,20 +599,9 @@ int process_server_request(struct mbuf *request,
     NETPERF_DEBUG("Total pkts required: %d", total_packets_required);
     uint64_t segments[MAX_SCATTERS];
     struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
-
-    NETPERF_ASSERT((payload_len % sizeof(uint64_t) == 0),
-                    "Payload length: %u not divisible by 8.", (unsigned)payload_len);
-
-    // TODO: check this assertion in non-debug mode
+    
     NETPERF_DEBUG("Received packet with payload_len: %lu\n", payload_len);
-    NETPERF_ASSERT(((payload_len - (SEGLIST_OFFSET * sizeof(uint64_t))) / 
-                        sizeof(uint64_t)) == num_segments, 
-                        "Request segments %u doesn't match server segments %u",
-                        (unsigned)(payload_len / sizeof(uint64_t) - SEGLIST_OFFSET),
-                        (unsigned)num_segments);
-
     uint64_t id = read_u64(payload, ID_OFF);
-    uint64_t timestamp = read_u64(payload, TIMESTAMP_OFF);
 
     NETPERF_DEBUG("Received packet with id %lu", id);
         
@@ -614,7 +612,17 @@ int process_server_request(struct mbuf *request,
 
     size_t payload_left = num_segments * segment_size;
     size_t segment_array_idx = 0;
+    
+    RequestHeader request_header;
+    // TODO: this technically isn't correct if each request actually sends more
+    // than one packet
+    // We are providing one request header, but in reality there should be n
+    // with the payload size for that split up packet
+    int ret = parse_outgoing_request_header(&request_header, request, payload_left);
+    RETURN_ON_ERR(ret, "constructing outgoing header failed");
+
     for (int pkt_idx = 0; pkt_idx < total_packets_required; pkt_idx++) {
+        request_headers[pkt_idx] = &request_header;
         size_t actual_segment_size = MIN(payload_left, MIN(segment_size, MAX_SEGMENT_SIZE));
         size_t nb_segs_per_packet = (MIN(payload_left, MAX_SEGMENT_SIZE)) / actual_segment_size;
         size_t pkt_len = actual_segment_size * nb_segs_per_packet;
@@ -629,12 +637,13 @@ int process_server_request(struct mbuf *request,
                                                             segment_size);
                 // allocate mbuf 
                 send_mbufs[pkt_idx][seg] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
+                send_mbufs[pkt_idx][seg]->lkey = tx_mr->lkey;
 
                 // set the next buffer pointer for previous mbuf
                 if (prev != NULL) {
                     prev->next = send_mbufs[pkt_idx][seg];
-                    prev = send_mbufs[pkt_idx][seg];
                 }
+                prev = send_mbufs[pkt_idx][seg];
 
                 // set metadata for this mbuf
                 send_mbufs[pkt_idx][seg]->release = zero_copy_tx_completion;
@@ -653,6 +662,7 @@ int process_server_request(struct mbuf *request,
         } else {
             // single buffer for this packet
             send_mbufs[pkt_idx][0] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
+            send_mbufs[pkt_idx][0]->lkey = tx_mr->lkey;
             //NETPERF_INFO("Allocatng mbuf %p", send_mbufs[pkt_idx][0]);
             // allocate backing buffer for this mbuf
             unsigned char *buffer = (unsigned char *)mempool_alloc(&tx_buf_mempool);
@@ -684,15 +694,7 @@ int process_server_request(struct mbuf *request,
             send_mbufs[pkt_idx][0]->nb_segs = 1;
         }
 
-        // for each first packet, copy in the ID
-        uint64_t *id_pointer = mbuf_offset(send_mbufs[pkt_idx][0], 
-                                            FULL_HEADER_SIZE + sizeof(uint64_t),
-                                            uint64_t *);
-        *id_pointer = id;
-        uint64_t *timestamp_pointer = mbuf_offset(send_mbufs[pkt_idx][0], 
-                                            FULL_HEADER_SIZE + 0 * sizeof(uint64_t),
-                                            uint64_t *);
-        *timestamp_pointer = timestamp;
+        // for the first packet, record the packet len
         send_mbufs[pkt_idx][0]->pkt_len = pkt_len;
     }
 
@@ -707,7 +709,9 @@ int process_server_request(struct mbuf *request,
         int sent = mlx5_transmit_batch(send_mbufs, 
                                         total_sent, // index to start on
                                         total_packets_required - total_sent, // tota
-                                        &txqs[0]);
+                                        &txqs[0],
+                                        request_headers,
+                                        inline_lengths);
         NETPERF_DEBUG("Successfully sent from %d, %d packets", total_sent, sent);
         if (sent < (total_packets_required - total_sent)) {
             NETPERF_INFO("Trying to send request again");

@@ -323,8 +323,7 @@ int mlx5_qs_init_flows(struct mlx5_rxq *v,
                         struct ibv_pd *ibv_pd,
                         struct ibv_context *ibv_context,
                         struct eth_addr *our_eth,
-                        struct eth_addr *other_eth,
-                        int hardcode_sender) {
+                        struct eth_addr *other_eth) {
 
 	struct ibv_wq *ind_tbl[1] = {v->rx_wq};
 	struct ibv_rwq_ind_table_init_attr rwq_attr = {0};
@@ -377,7 +376,7 @@ int mlx5_qs_init_flows(struct mlx5_rxq *v,
             .type = IBV_FLOW_SPEC_ETH,
             .size = sizeof(struct ibv_flow_spec_eth),
             .val = {
-                .src_mac = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+                //.src_mac = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
                 .ether_type = 0,
                 .vlan_tag = 0,
             },
@@ -390,12 +389,6 @@ int mlx5_qs_init_flows(struct mlx5_rxq *v,
         }
     };
     rte_memcpy(&flow_attr.spec_eth.val.dst_mac, our_eth, 6);
-    if (hardcode_sender == 1) {
-        NETPERF_DEBUG("Setting src addr on flow rule.");
-        rte_memcpy(&flow_attr.spec_eth.val.src_mac, other_eth, 6);
-        memset(&flow_attr.spec_eth.mask.src_mac, 0XFF, 6);
-    }
-    
     struct ibv_flow *eth_flow = ibv_create_flow(v->qp, &flow_attr.attr);
     if (!eth_flow) {
         NETPERF_ERROR("Not able to create eth_flow: %s", strerror(errno));
@@ -405,48 +398,12 @@ int mlx5_qs_init_flows(struct mlx5_rxq *v,
     return 0;
 }
 
-// If there is a single scatter-gather element,
-// we can pre-initialize all of the wqes before sending.
-void mlx5_init_tx_segment(struct mlx5_txq *v, 
-                                    struct ibv_mr *mr_tx, 
-                                    unsigned int idx)
-{
-	int size;
-	struct mlx5_wqe_ctrl_seg *ctrl;
-	struct mlx5_wqe_eth_seg *eseg;
-	struct mlx5_wqe_data_seg *dpseg;
-	void *segment;
-
-	segment = v->tx_qp_dv.sq.buf + idx * v->tx_qp_dv.sq.stride;
-	ctrl = segment;
-	eseg = segment + sizeof(*ctrl);
-	dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
-
-	size = (sizeof(*ctrl) / 16) +
-	       (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
-	       sizeof(struct mlx5_wqe_data_seg) / 16;
-
-	/* set ctrl segment */
-	*(uint32_t *)(segment + 8) = 0;
-	ctrl->imm = 0;
-	ctrl->fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
-	ctrl->qpn_ds = htobe32(size | (v->tx_qp->qp_num << 8));
-
-	/* set eseg */
-	memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
-	eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
-
-	/* set dpseg */
-	dpseg->lkey = htobe32(mr_tx->lkey);
-}
-
 int mlx5_init_txq(struct mlx5_txq *v,
                     struct ibv_pd *ibv_pd,
                     struct ibv_context *ibv_context,
                     struct ibv_mr *mr_tx,
                     size_t max_inline_data,
                     int init_each_tx_segment) {
-    int i;
     int ret = 0;
 
 	/* Create a CQ */
@@ -543,21 +500,13 @@ int mlx5_init_txq(struct mlx5_txq *v,
 	v->tx_cq_log_stride = __builtin_ctz(v->tx_cq_dv.cqe_size);
 
 	/* allocate list of posted buffers */
-	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
-	if (!v->buffers) {
+    v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
+    if (!v->buffers) {
         NETPERF_WARN("Could not alloc tx wqe buffers");
-		return -ENOMEM;
-    }
-
-    // init each tx wqe
-    if (init_each_tx_segment == 1) {
-        NETPERF_DEBUG("Initializing tx segments: %u", (unsigned)v->tx_qp_dv.sq.wqe_cnt);
-	for (i = 0; i < v->tx_qp_dv.sq.wqe_cnt; i++)
-		mlx5_init_tx_segment(v, mr_tx, i);
+        return -ENOMEM;
     }
 
     return 0;
-    
 }
 
 

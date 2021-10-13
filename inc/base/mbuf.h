@@ -19,7 +19,7 @@
 
 
 struct mbuf {
-	struct mbuf	*next;	   /* the next mbuf in the mbufq */
+	struct mbuf	*next;	   /* the next mbuf in the mbuf linked list */
 	unsigned char	*head;	   /* start of the buffer */
 	unsigned char	*data;	   /* current position within the buffer */
 	unsigned int	head_len;  /* length of the entire buffer from @head */
@@ -34,7 +34,8 @@ struct mbuf {
 	
     unsigned long   release_data;	/* data for the release method (could be used for ref-counting)*/
 	void		(*release)(struct mbuf *m); /* frees the mbuf */
-
+    size_t num_wqes; /* Number of wqes (including wqes) this transmission took */
+    uint32_t lkey;  /* Lkey for the mr region this mbuf points to. */
 };
 
 static inline unsigned char *__mbuf_pull(struct mbuf *m, unsigned int len)
