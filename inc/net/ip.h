@@ -36,13 +36,16 @@
 #include <base/types.h>
 #include <base/byteorder.h>
 #include <netinet/in.h>
+#include <base/debug.h>
 
 /*
  * Definitions for internet protocol version 4.
  *
  * Per RFC 791, September 1981.
  */
+#define IHL_NO_OPTIONS 5
 #define	IPVERSION	4
+#define VERSION_IHL (IPVERSION << 4) | IHL_NO_OPTIONS
 
 #define MAKE_IP_ADDR(a, b, c, d)			\
 	(((uint32_t) a << 24) | ((uint32_t) b << 16) |	\
@@ -56,22 +59,11 @@ extern char *ip_addr_to_str(uint32_t addr, char *str);
  * Structure of an internet header, naked of options.
  */
 struct ip_hdr {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-	uint8_t	header_len:4,		/* header length */
-		version:4;		/* version */
-#endif
-#if __BYTE_ORDER == __BIG_ENDIAN
-	uint8_t	version:4,		/* version */
-		header_len:4;		/* header length */
-#endif
-	uint8_t tos;			/* type of service */
-	uint16_t len;			/* total length */
+    uint8_t version_ihl; /* version and ihl */
+    uint8_t tos;        /* type of service */
+    uint16_t len;       /* total packet length */
 	uint16_t id;			/* identification */
 	uint16_t off;			/* fragment offset field */
-#define	IP_RF 0x8000			/* reserved fragment flag */
-#define	IP_DF 0x4000			/* dont fragment flag */
-#define	IP_MF 0x2000			/* more fragments flag */
-#define	IP_OFFMASK 0x1fff		/* mask for fragmenting bits */
 	uint8_t ttl;			/* time to live */
 	uint8_t proto;			/* protocol */
 	uint16_t chksum;		/* checksum */
@@ -79,6 +71,10 @@ struct ip_hdr {
 	uint32_t daddr;			/* dest address */
 } __packed __aligned(4);
 
+#define	IP_RF 0x8000			/* reserved fragment flag */
+#define	IP_DF 0x4000			/* dont fragment flag */
+#define	IP_MF 0x2000			/* more fragments flag */
+#define	IP_OFFMASK 0x1fff		/* mask for fragmenting bits */
 #define	IP_MAXPACKET	65535		/* maximum packet size */
 
 /*
@@ -259,6 +255,7 @@ struct ip_pseudo {
          sum += left;
      }
  
+     NETPERF_DEBUG("Returning %u as sum", sum);
      return sum;
  }
  
@@ -267,6 +264,7 @@ struct ip_pseudo {
  {
      sum = ((sum & 0xffff0000) >> 16) + (sum & 0xffff);
      sum = ((sum & 0xffff0000) >> 16) + (sum & 0xffff);
+     NETPERF_DEBUG("Returning %u as reduced sum, %u as u16, htons %u", sum, (uint16_t)sum, htons(sum));
      return (uint16_t)sum;
  }
  

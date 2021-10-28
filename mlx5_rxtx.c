@@ -142,7 +142,6 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
     eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
     eseg->inline_hdr_sz = htobe16(inline_len);
-    eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
     current_segment_ptr += offsetof(struct mlx5_wqe_eth_seg, inline_hdr_start);
     NETPERF_DEBUG("Inline addr: %p", current_segment_ptr);
 

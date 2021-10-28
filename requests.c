@@ -32,7 +32,7 @@ int initialize_reverse_request_header(RequestHeader *request_header,
                                         struct udp_hdr *udp,
                                         size_t payload_size,
                                         uint64_t packet_id) {
-    NETPERF_DEBUG("Received header");
+    NETPERF_DEBUG("Received header, src ip %u and src port %u, dst ip %u, dst port %u", ntohl(ipv4->saddr), ntohs(udp->src_port), ntohl(ipv4->daddr), ntohs(udp->dst_port));
     struct eth_hdr *outgoing_eth = &request_header->packet_header.eth;
     struct ip_hdr *outgoing_ipv4 = &request_header->packet_header.ipv4;
     struct udp_hdr *outgoing_udp = &request_header->packet_header.udp;
@@ -43,6 +43,7 @@ int initialize_reverse_request_header(RequestHeader *request_header,
     outgoing_eth->type = htons(ETHTYPE_IP);
 
     /* Reverse ipv4 header */
+    outgoing_ipv4->version_ihl = VERSION_IHL;
     outgoing_ipv4->tos = 0x0;
     outgoing_ipv4->len = htons(sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + payload_size);
     outgoing_ipv4->id = htons(1);
@@ -53,12 +54,13 @@ int initialize_reverse_request_header(RequestHeader *request_header,
     outgoing_ipv4->chksum = 0;
     outgoing_ipv4->saddr = ipv4->daddr;
     outgoing_ipv4->daddr = ipv4->saddr;
+    //outgoing_ipv4->chksum = get_chksum(ipv4);
     
     /* Reverse udp header */
     outgoing_udp->src_port = udp->dst_port;
     outgoing_udp->dst_port = udp->src_port;
     outgoing_udp->len = htons(sizeof(struct udp_hdr) + payload_size);
-    outgoing_udp->chksum = get_chksum(udp);
+    //outgoing_udp->chksum = get_chksum(udp);
 
 
     /* Insert back packet id */
@@ -85,6 +87,7 @@ int initialize_outgoing_header(OutgoingHeader *header,
     eth->type = htons(ETHTYPE_IP);
 
     // write in the ipv4 header
+    ipv4->version_ihl = VERSION_IHL;
     ipv4->tos = 0x0;
     ipv4->len = htons(sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + payload_size);
     ipv4->id = htons(1);
@@ -95,6 +98,7 @@ int initialize_outgoing_header(OutgoingHeader *header,
     ipv4->chksum = 0;
     ipv4->saddr = htonl(src_ip);
     ipv4->daddr = htonl(dst_ip);
+    ipv4->chksum = get_chksum(ipv4);
 
     // fill in the udp header
     udp->src_port = htons(src_port);
