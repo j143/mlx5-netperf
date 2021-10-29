@@ -58,7 +58,7 @@ int mlx5_gather_completions(struct mbuf **mbufs,
 
 		PANIC_ON_TRUE(opcode != MLX5_CQE_REQ, "wrong opcode");
 
-		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "cq->cqe_cntwrong cqe format");
+		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "cq->cqe_cnt wrong cqe format");
 
 		wqe_idx = be16toh(cqe->wqe_counter) & (v->tx_qp_dv.sq.wqe_cnt - 1);
         NETPERF_DEBUG("Completion on wqe idx: %u; unwrapped cqe wqe idx: %u, wqe ct: %u, cqe cnt: %u", wqe_idx, be16toh(cqe->wqe_counter), v->tx_qp_dv.sq.wqe_cnt, cq->cqe_cnt);
@@ -114,7 +114,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
 		for (i = 0; i < compl; i++)
 			mbuf_free(mbs[i]);
 		if (unlikely((v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v)) < num_wqes)) {
-            NETPERF_WARN("txq full: inflight %u, ct %u, sq: %u, cq: %u", nr_inflight_tx(v), v->tx_qp_dv.sq.wqe_cnt, v->sq_head, v->cq_head);
+            NETPERF_DEBUG("txq full: inflight %u, ct %u, sq: %u, true cq: %u", nr_inflight_tx(v), v->tx_qp_dv.sq.wqe_cnt, v->sq_head, v->true_cq_head);
 			return ENOMEM;
 		}
     }
@@ -217,7 +217,7 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
 
     int ret = mlx5_fill_tx_segment(v, m, request_header, inline_len);
     if (ret == ENOMEM) {
-        NETPERF_WARN("could not construct segment: txq full");
+        NETPERF_DEBUG("from filling in segment: could not construct segment: txq full");
         return 0;
     }
     RETURN_ON_ERR(ret, "Could not fill tx segment");
@@ -238,10 +238,6 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
 		for (i = 0; i < compl; i++)
 			mbuf_free(mbs[i]);
-		if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
-            NETPERF_WARN("txq full");
-			return 0;
-		}
 	}
 
 	return 1;

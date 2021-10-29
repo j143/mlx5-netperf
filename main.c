@@ -600,7 +600,6 @@ int process_server_request(struct mbuf *request,
     uint64_t segments[MAX_SCATTERS];
     struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
     
-    NETPERF_DEBUG("Received packet with payload_len: %lu\n", payload_len);
         
     for (size_t i = 0; i < num_segments; i++) {
         segments[i] = read_u64(payload, i + SEGLIST_OFFSET);
@@ -634,6 +633,16 @@ int process_server_request(struct mbuf *request,
                                                             segment_size);
                 // allocate mbuf 
                 send_mbufs[pkt_idx][seg] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
+                if (send_mbufs[pkt_idx][seg] == NULL) {
+                    // free all previous allocated mbufs
+                    for (size_t pkt = 0; pkt < pkt_idx; pkt++) {
+                        if (pkt == pkt_idx) {
+                            break;
+                        }
+                        mbuf_free(send_mbufs[pkt_idx][0]);
+                    }
+                    return ENOMEM;
+                }
                 send_mbufs[pkt_idx][seg]->lkey = tx_mr->lkey;
 
                 // set the next buffer pointer for previous mbuf
@@ -659,10 +668,17 @@ int process_server_request(struct mbuf *request,
         } else {
             // single buffer for this packet
             send_mbufs[pkt_idx][0] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
+            if (send_mbufs[pkt_idx][0] == NULL) {
+                return ENOMEM;
+            }
             send_mbufs[pkt_idx][0]->lkey = tx_mr->lkey;
             //NETPERF_INFO("Allocatng mbuf %p", send_mbufs[pkt_idx][0]);
             // allocate backing buffer for this mbuf
             unsigned char *buffer = (unsigned char *)mempool_alloc(&tx_buf_mempool);
+            if (buffer == NULL) {
+                mbuf_free(send_mbufs[pkt_idx][0]);
+                return ENOMEM;
+            }
             //NETPERF_INFO("Allocating mbuf buffer %p", buffer);
             mbuf_init(send_mbufs[pkt_idx][0],
                         buffer,
@@ -702,6 +718,7 @@ int process_server_request(struct mbuf *request,
     add_latency(&server_construction_dist, end_construct - start_construct);
     uint64_t start_send = cycletime();
 #endif
+    size_t tries = 0;
     while (total_sent < total_packets_required) {
         int sent = mlx5_transmit_batch(send_mbufs, 
                                         total_sent, // index to start on
@@ -709,11 +726,21 @@ int process_server_request(struct mbuf *request,
                                         &txqs[0],
                                         request_headers,
                                         inline_lengths);
+        tries += 1;
         NETPERF_DEBUG("Successfully sent from %d, %d packets", total_sent, sent);
         if (sent < (total_packets_required - total_sent)) {
-            NETPERF_INFO("Trying to send request again");
+            NETPERF_DEBUG("Trying to send request again");
         }
         total_sent += sent;
+        // TODO: It doesn't seem sensible to send "part" of one response if
+        // more than one packet is required
+        if (total_sent < total_packets_required) {
+            // free all buffers used for this request, that weren't sent
+            for (size_t pkt = total_sent; pkt < total_packets_required; pkt++) {
+                mbuf_free(send_mbufs[pkt][0]);
+            }
+            return ENOMEM;
+        }
     }
 #ifdef __TIMERS__
     uint64_t end_send = cycletime();
@@ -755,12 +782,16 @@ int do_server() {
                                                     payload_len,
                                                     total_packets_required,
                                                     recv_time);
-#ifdef __TIMERS__
-                uint64_t cycles_end = cycletime();
-                add_latency(&server_request_dist, cycles_end - cycles_start);
-#endif
                 mbuf_free(pkt);
-                RETURN_ON_ERR(ret, "Error processing request");
+                if (ret == ENOMEM) {
+                    NETPERF_DEBUG("Server overloaded, dropping request");
+                } else {
+#ifdef __TIMERS__
+                    uint64_t cycles_end = cycletime();
+                    add_latency(&server_request_dist, cycles_end - cycles_start);
+#endif
+                    RETURN_ON_ERR(ret, "Error processing request: %s", strerror(ret));
+                }
             }
         }
     }

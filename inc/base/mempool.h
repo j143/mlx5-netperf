@@ -5,6 +5,7 @@
 #pragma once
 
 #include <base/stddef.h>
+#include <base/debug.h>
 
 struct mempool {
 	void			**free_items;
@@ -48,6 +49,9 @@ static inline void *mempool_alloc(struct mempool *m)
 static inline void mempool_free(struct mempool *m, void *item)
 {
 	__mempool_free_debug_check(m, item);
+    if (m->allocated == 0) {
+        NETPERF_WARN("Error: mem allocated is 0");
+    }
 	m->free_items[--m->allocated] = item;
 	assert(m->allocated <= m->capacity); /* could have overflowed */
 }
