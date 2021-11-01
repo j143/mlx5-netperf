@@ -39,9 +39,6 @@ int mlx5_gather_completions(struct mbuf **mbufs,
                             struct mlx5_txq *v, 
                             unsigned int budget)
 {
-    // question to figure out: if a particular send takes more than one wqe
-    // (let's say it takes two wqes) ==> is there "one" completion notification
-    // per mbuf or 2?
 	struct mlx5dv_cq *cq = &v->tx_cq_dv;
 	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
 
@@ -50,14 +47,17 @@ int mlx5_gather_completions(struct mbuf **mbufs,
 	uint16_t wqe_idx;
 
 	for (compl_cnt = 0; compl_cnt < budget; compl_cnt++, v->cq_head++) {
+        NETPERF_DEBUG("Completion on cqe: %u, true_cq_head: %u", v->cq_head, v->true_cq_head);
 		cqe = &cqes[v->cq_head & (cq->cqe_cnt - 1)];
 		opcode = cqe_status(cqe, cq->cqe_cnt, v->cq_head);
+        NETPERF_DEBUG("parity: %u", v->cq_head & cq->cqe_cnt);
 
-		if (opcode == MLX5_CQE_INVALID)
+
+		if (opcode == MLX5_CQE_INVALID) {
 			break;
+        }
 
-		PANIC_ON_TRUE(opcode != MLX5_CQE_REQ, "wrong opcode");
-
+		PANIC_ON_TRUE(opcode != MLX5_CQE_REQ, "wrong opcode, cqe format, equals 0x3: %d, %d", mlx5_get_cqe_format(cqe), mlx5_get_cqe_format(cqe) == 0x3);
 		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "cq->cqe_cnt wrong cqe format");
 
 		wqe_idx = be16toh(cqe->wqe_counter) & (v->tx_qp_dv.sq.wqe_cnt - 1);
@@ -106,7 +106,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     // number of work requests must be padded to 4 16-byte segments
     int num_wqes = (num_hdr_segs + num_dpsegs + 3) / 4;
 
-    NETPERF_DEBUG("Num octowords for req: %d, num wqes: %d", num_hdr_segs + num_dpsegs, num_wqes);
+    NETPERF_DEBUG("Num octowords for req: %d, num wqes: %d, in flight: %u, total: %u, free: %u", num_hdr_segs + num_dpsegs, num_wqes, nr_inflight_tx(v), v->tx_qp_dv.sq.wqe_cnt, v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v));
 
     // check if there are enough wqes: if not: check for completions
     if (unlikely((v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v)) < num_wqes)) {
@@ -120,8 +120,8 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     }
 
     // calculate number of contiguous wqes (before the end of the ringe buffer)
-    uint32_t current_idx = POW2MOD(v->sq_head, v->tx_qp_dv.sq.wqe_cnt - 1);
-    NETPERF_DEBUG("Current post number: %u, wrapped: %u", v->sq_head, current_idx);
+    uint32_t current_idx = POW2MOD(v->sq_head, v->tx_qp_dv.sq.wqe_cnt);
+    NETPERF_DEBUG("Current post number: %u, size: %u, wrapped: %u, and: %u", v->sq_head, v->tx_qp_dv.sq.wqe_cnt, current_idx, v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1));
     current_segment_ptr  = get_segment(v, current_idx);
     NETPERF_DEBUG("Ctrl seg addr: %p", current_segment_ptr);
     
