@@ -39,6 +39,7 @@ int mlx5_gather_completions(struct mbuf **mbufs,
                             struct mlx5_txq *v, 
                             unsigned int budget)
 {
+    NETPERF_DEBUG("Calling gather completions");
 	struct mlx5dv_cq *cq = &v->tx_cq_dv;
 	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
 
@@ -47,17 +48,18 @@ int mlx5_gather_completions(struct mbuf **mbufs,
 	uint16_t wqe_idx;
 
 	for (compl_cnt = 0; compl_cnt < budget; compl_cnt++, v->cq_head++) {
-        NETPERF_DEBUG("Completion on cqe: %u, true_cq_head: %u", v->cq_head, v->true_cq_head);
+        NETPERF_DEBUG("Completion on cqe: %u, true_cq_head: %u, true idx: %u", v->cq_head, v->true_cq_head, v->cq_head & (cq->cqe_cnt - 1));
 		cqe = &cqes[v->cq_head & (cq->cqe_cnt - 1)];
 		opcode = cqe_status(cqe, cq->cqe_cnt, v->cq_head);
         NETPERF_DEBUG("parity: %u", v->cq_head & cq->cqe_cnt);
 
 
 		if (opcode == MLX5_CQE_INVALID) {
+            NETPERF_DEBUG("Invalid cqe for cqe %u", v->cq_head);
 			break;
         }
 
-		PANIC_ON_TRUE(opcode != MLX5_CQE_REQ, "wrong opcode, cqe format, equals 0x3: %d, %d", mlx5_get_cqe_format(cqe), mlx5_get_cqe_format(cqe) == 0x3);
+		PANIC_ON_TRUE(opcode != MLX5_CQE_REQ, "wrong opcode, cqe format: %d, equals 0x3: %d, opcode: %d, wqe counter: %d, syndrome: %d", mlx5_get_cqe_format(cqe), mlx5_get_cqe_format(cqe) == 0x3, mlx5_get_cqe_opcode(cqe), be16toh(cqe->wqe_counter), get_error_syndrome(cqe));
 		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "cq->cqe_cnt wrong cqe format");
 
 		wqe_idx = be16toh(cqe->wqe_counter) & (v->tx_qp_dv.sq.wqe_cnt - 1);
@@ -182,20 +184,22 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
 
     struct mbuf *curr = m;
     m->num_wqes = num_wqes;
+    uint32_t dpseg_ct = 0;
     while (curr != NULL) {
         dpseg = current_segment_ptr;
         // lkey already set during initialization
-        NETPERF_DEBUG("Transmitting mbuf with length %u, data_ptr %p", mbuf_length(m), mbuf_data(m));
-	    dpseg->byte_count = htobe32(mbuf_length(m));
-	    dpseg->addr = htobe64((uint64_t)mbuf_data(m));
-
+        NETPERF_DEBUG("[Dseg %u] Transmitting mbuf with length %u, data_ptr %p", dpseg_ct, mbuf_length(curr), mbuf_data(curr));
+	    dpseg->byte_count = htobe32(mbuf_length(curr));
+	    dpseg->addr = htobe64((uint64_t)mbuf_data(curr));
+        dpseg->lkey = htobe32(curr->lkey);
+        curr = curr->next;
         // go to next segment ptr and roll over
         current_segment_ptr += sizeof(*dpseg);
         if (dpseg == end_ptr) {
+            NETPERF_DEBUG("Reaching case where next dpseg wraps around");
             current_segment_ptr = v->tx_qp_dv.sq.buf;
         }
-        dpseg->lkey = htobe32(curr->lkey);
-        curr = curr->next;
+        dpseg_ct++;
     }
 
     /* record buffer for completion queue */
@@ -204,7 +208,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     // This is probably ok
     store_release(&v->buffers[v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1)], m);
     v->sq_head += num_wqes;
-    NETPERF_DEBUG("Incrementing sq_head to %u", v->sq_head);
+    NETPERF_DEBUG("Incrementing sq_head to %u, wrapped: %u", v->sq_head, POW2MOD(v->sq_head, v->tx_qp_dv.sq.wqe_cnt));
 
     return 0; 
 }
@@ -221,7 +225,6 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
         return 0;
     }
     RETURN_ON_ERR(ret, "Could not fill tx segment");
-    NETPERF_DEBUG("Size of bf reg: %u", v->tx_qp_dv.bf.size);
 
 	/* write doorbell record */
 	udma_to_device_barrier();

@@ -104,6 +104,10 @@ static inline int mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
 	return (cqe->op_own & 0xc) >> 2;
 }
 
+static inline int get_error_syndrome(struct mlx5_cqe64 *cqe) {
+    return ((struct mlx5_err_cqe *)cqe)->syndrome;
+}
+
 static inline uint32_t mlx5_get_rss_result(struct mlx5_cqe64 *cqe)
 {
 	return ntoh32(*((uint32_t *)cqe + 3));
