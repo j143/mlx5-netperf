@@ -159,6 +159,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     // buffer
     // 2: the inline data can fit before the buffer wraps around
     if ((end_ptr - current_segment_ptr) < inline_len) {
+        NETPERF_DEBUG("In case where inline_len %lu greater than space left %lu", inline_len, (end_ptr - current_segment_ptr));
         // copy first chunk
         size_t first_chunk_size = end_ptr - current_segment_ptr;
         void *inline_ptr = request_header;
@@ -169,6 +170,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
         inline_ptr += first_chunk_size;
 
         // 2nd chunk
+        NETPERF_DEBUG("Wrapped around, copying %lu more", (inline_len - first_chunk_size));
         rte_memcpy(current_segment_ptr, inline_ptr, inline_len - first_chunk_size);
         // pad to next 16 byte aligned ptr
         current_segment_ptr += (inline_len - first_chunk_size + 15) & ~0xf;
@@ -195,7 +197,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
         curr = curr->next;
         // go to next segment ptr and roll over
         current_segment_ptr += sizeof(*dpseg);
-        if (dpseg == end_ptr) {
+        if (current_segment_ptr == end_ptr) {
             NETPERF_DEBUG("Reaching case where next dpseg wraps around");
             current_segment_ptr = v->tx_qp_dv.sq.buf;
         }
@@ -206,7 +208,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     // TODO: this corresponds to the sq_head, which means there's potentially
     // some gaps
     // This is probably ok
-    store_release(&v->buffers[v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1)], m);
+    store_release(&v->buffers[current_idx], m);
     v->sq_head += num_wqes;
     NETPERF_DEBUG("Incrementing sq_head to %u, wrapped: %u", v->sq_head, POW2MOD(v->sq_head, v->tx_qp_dv.sq.wqe_cnt));
 

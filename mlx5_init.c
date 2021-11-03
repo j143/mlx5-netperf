@@ -424,6 +424,7 @@ int mlx5_init_txq(struct mlx5_txq *v,
 		return -errno;
     }
 
+
 	/* Create a 1-sided queue pair for sending packets */
     // TODO: understand the relationship between max_send_sge and how much it's
     // possible to actually scatter-gather
@@ -499,6 +500,7 @@ int mlx5_init_txq(struct mlx5_txq *v,
 	v->tx_sq_log_stride = __builtin_ctz(v->tx_qp_dv.sq.stride);
 	v->tx_cq_log_stride = __builtin_ctz(v->tx_cq_dv.cqe_size);
 
+    NETPERF_WARN("Wqe cnt of tx qp: %u, cqe cnt: %u", v->tx_qp_dv.sq.wqe_cnt, v->tx_cq_dv.cqe_cnt);
 	/* allocate list of posted buffers */
     v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
     if (!v->buffers) {

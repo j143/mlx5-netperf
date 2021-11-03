@@ -17,8 +17,8 @@
 
 #define PORT_NUM 1 // TODO: make this dynamic
 #define NUM_QUEUES 1
-#define RQ_NUM_DESC			2048
-#define SQ_NUM_DESC			2048
+#define RQ_NUM_DESC			1024
+#define SQ_NUM_DESC			128
 #define RUNTIME_RX_BATCH_SIZE		32
 #define SQ_CLEAN_THRESH			RUNTIME_RX_BATCH_SIZE
 #define SQ_CLEAN_MAX			SQ_CLEAN_THRESH
