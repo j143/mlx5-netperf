@@ -2,10 +2,10 @@ ROOT_PATH=.
 
 # shared toolchain definitions
 INC = -I$(ROOT_PATH)/inc
-CFLAGS  = -g -Wall -D_GNU_SOURCE $(INC) -lstdc++ -O3 -fsanitize=unreachable
+CFLAGS  = -g -Wall -D_GNU_SOURCE $(INC) -lstdc++ -O3 -fsanitize=unreachable 
 EXTRA_CFLAGS = -lm
-LDFLAGS_SHARED = 
-LDFLAGS_STATIC = 
+LDFLAGS_SHARED =
+LDFLAGS_STATIC =
 LD      = gcc
 CC      = gcc
 LDXX	= g++
@@ -31,6 +31,9 @@ LDFLAGS_STATIC += $(MLX5_LIBS)
 INC += $(MLX5_INC)
 endif
 
+LDFLAGS_SHARED += -lstdc++
+LDFLAGS_STATIC += -lstdc++
+
 #binary name
 APP = mlx5-netperf
 # libbase.a - the base library
@@ -38,7 +41,8 @@ base_src = $(wildcard base/*.c)
 base_obj = $(base_src:.c=.o)
 
 # main - the main binary
-SRCS-y := main.c mlx5_init.c mlx5_rxtx.c latency.c requests.c time.c mempool.c mem.c pci.c bitmap.c sysfs.c 
+SRCS-y := main.c busy_work.c mlx5_init.c mlx5_rxtx.c latency.c requests.c time.c mempool.c mem.c pci.c bitmap.c sysfs.c 
+
 
 all: shared
 .PHONY: shared static
@@ -47,11 +51,11 @@ shared: build/$(APP)-shared
 static: export build/$(APP)-static
 	ln -sf $(APP)-static build/$(APP)
 
-build/$(APP)-shared: $(SRCS-y) Makefile | build
+build/$(APP)-shared: $(SRCS-y)  Makefile | build
 	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(EXTRA_CFLAGS) $(LDFLAGS) $(LDFLAGS_SHARED)
 
 build/$(APP)-static: $(SRCS-y) Makefile | build
-	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(EXTRA_CFLAGS) $(LDFLAGS) $(LDFLAGS_STATIC)
+	$(CC) $(CFLAGS) $(SRCS-y) $(SRCS-x) -o $@ $(EXTRA_CFLAGS) $(LDFLAGS) $(LDFLAGS_STATIC)
 
 build:
 	@mkdir -p $@

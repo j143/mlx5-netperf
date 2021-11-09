@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 
 #include <asm/ops.h>
+#include <base/busy_work.h>
 #include <base/debug.h>
 #include <base/time.h>
 #include <base/parse.h>
@@ -56,6 +57,8 @@ static uint32_t client_port = 54321;
 static size_t num_segments = 1;
 static size_t segment_size = 1024;
 static size_t working_set_size = 16384;
+static size_t busy_work_us = 0;
+static size_t busy_iters = 0;
 static int zero_copy = 1;
 static int has_latency_log = 0;
 static char *latency_log;
@@ -109,6 +112,7 @@ static int parse_args(int argc, char *argv[]) {
         {"rate", optional_argument, 0, 'r'},
         {"time", optional_argument, 0, 't'},
         {"array_size", optional_argument, 0, 'a'},
+        {"busy_work_us", optional_argument, 0, 'y'},
         {"latency_log", optional_argument, 0, 'l'},
         {"with_copy", no_argument, 0, 'z'},
         {0,           0,                 0,  0   }
@@ -173,6 +177,10 @@ static int parse_args(int argc, char *argv[]) {
                 str_to_long(optarg, &tmp);
                 working_set_size = tmp;
                 break;
+            case 'y': // amount of cpu cycles to do math in us
+                str_to_long(optarg, &tmp);
+                busy_work_us = tmp;
+                busy_iters = calibrate_busy_work(busy_work_us);
             case 'z': // with_copy
                 zero_copy = 0;
                 break;
@@ -777,6 +785,10 @@ int do_server() {
 #ifdef __TIMERS__
                 uint64_t cycles_start = cycletime();
 #endif
+                // do busy work
+                if (busy_iters > 0)  {
+                    do_busy_work(busy_iters);
+                }
                 int ret = process_server_request(pkt, 
                                                     payload_out, 
                                                     payload_len,
@@ -826,6 +838,8 @@ void sig_handler(int signo) {
 int main(int argc, char *argv[]) {
     int ret = 0;
     seed_rand();
+    // Global time initialization
+    ret = time_init();
 
     NETPERF_DEBUG("In netperf program");
     ret = parse_args(argc, argv);
@@ -833,8 +847,6 @@ int main(int argc, char *argv[]) {
         NETPERF_WARN("parse_args() failed.");
     }
 
-    // Global time initialization
-    ret = time_init();
     if (ret) {
         NETPERF_WARN("Time initialization failed.");
         return ret;
