@@ -75,6 +75,7 @@ static Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_
 static Latency_Dist_t client_lateness_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
 static Latency_Dist_t server_send_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
 static Latency_Dist_t server_construction_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
+static Latency_Dist_t busy_work_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
 #endif
 
 
@@ -787,8 +788,13 @@ int do_server() {
 #endif
                 // do busy work
                 if (busy_iters > 0)  {
-                    do_busy_work(busy_iters);
+                    volatile double v = do_busy_work(busy_iters / 2);
                 }
+#ifdef __TIMERS__
+                uint64_t end_busy = cycletime();
+                add_latency(&busy_work_dist, end_busy - cycles_start);
+
+#endif
                 int ret = process_server_request(pkt, 
                                                     payload_out, 
                                                     payload_len,
@@ -826,6 +832,9 @@ void sig_handler(int signo) {
         NETPERF_INFO("----");
         NETPERF_INFO("server pkt construct processing timers: ");
         dump_debug_latencies(&server_construction_dist, 1);
+        NETPERF_INFO("----");
+        NETPERF_INFO("busy work timers: ");
+        dump_debug_latencies(&busy_work_dist, 1);
         NETPERF_INFO("----");
     }
 #endif

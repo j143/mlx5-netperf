@@ -6,7 +6,7 @@
 
 double busy_work(size_t i);
 
-void do_busy_work(size_t iters);
+double do_busy_work(size_t iters);
 
 size_t calibrate_busy_work(uint64_t target_us);
 

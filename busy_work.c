@@ -16,14 +16,17 @@ double busy_work(size_t i) {
 
 uint64_t time_iterations(size_t iterations) {
     uint64_t trials = 100;
-    uint64_t start = cycletime(); 
+    uint64_t total = 0;
+
 
     for (uint64_t i = 0; i < trials; i++) {
+        uint64_t start = cycletime(); 
         do_busy_work(iterations);
+        total += cycletime() - start;
         i += 1;
     }
 
-    uint64_t ret = cycles_to_ns((float)(cycletime() - start) / (float)trials);
+    uint64_t ret = cycles_to_ns((float)(total) / (float)trials);
     return ret;
 }
 
@@ -45,9 +48,9 @@ size_t calibrate_busy_work(uint64_t target_us) {
     return iterations;
 }
 
-void do_busy_work(size_t iters) {
+double do_busy_work(size_t iters) {
     for (size_t i = 0; i < iters; i++) {
-        busy_work(i);
+        volatile double v = busy_work(i);
     }
 }
 
