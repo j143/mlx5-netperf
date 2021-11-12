@@ -182,6 +182,7 @@ static int parse_args(int argc, char *argv[]) {
                 str_to_long(optarg, &tmp);
                 busy_work_us = tmp;
                 busy_iters = calibrate_busy_work(busy_work_us);
+                break;
             case 'z': // with_copy
                 zero_copy = 0;
                 break;
