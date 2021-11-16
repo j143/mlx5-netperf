@@ -1,5 +1,7 @@
 name: Makefile CI
 
+# Workflow Docs
+# https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions
 on:
   push:
     branches: [ main ]
