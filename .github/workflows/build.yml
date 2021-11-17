@@ -1,0 +1,29 @@
+name: Makefile CI
+
+# Workflow Docs
+# https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Install OS depedencies
+      run: |
+        sudo apt-get install make gcc cmake pkg-config libnl-3-dev libnl-route-3-dev libnuma-dev uuid-dev libssl-dev libaio-dev libcunit1-dev libclang-dev
+    
+    - name: Checkout submodule, rdma-core
+      run: make submodules
+      
+    - name: Build with MLX5
+      run: make CONFIG_MLX5=y
+
